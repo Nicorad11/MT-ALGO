@@ -1,0 +1,2 @@
+# cmd.exe needs CRLF line endings for labels and goto to work reliably.
+*.bat text eol=crlf

@@ -137,6 +137,7 @@ class RiskState:
     cooldown_bars_left: int = 0
     entry_block: str | None = None  # weekend window / news blackout reason
     recent_flip_direction: str | None = None  # long | short | None (Trend Signals, filter mode)
+    currency: str = "EUR"
 
     def blocked_reasons(self, cfg: Config) -> list[str]:
         out = []
@@ -316,8 +317,8 @@ def _evaluate_entry(d: Decision, spec: SymbolSpec, mkt: Market, st: RiskState, c
     if order_type == "LIMIT":
         expiration = mkt.now + timedelta(minutes=15 * r.limit_expiry_bars)
     plan = Plan("OPEN_LIMIT" if order_type == "LIMIT" else "OPEN_MARKET", side, lots, entry, sl, tp, None, expiration, round(actual_risk, 2), round(risk_pct, 3))
-    reason = (f"Approved: stop {calc['stop_pips']} pips ({calc['stop_atr']}× ATR), R:R {calc['rr']:.2f}, "
-              f"risk {actual_risk:,.2f} ({risk_pct:.2f}%), {lots:g} lots")
+    reason = (f"Stop {calc['stop_pips']} pips ({calc['stop_atr']}× ATR), R:R {calc['rr']:.2f}, "
+              f"risk {actual_risk:,.2f} {st.currency} ({risk_pct:.2f}%), {lots:g} lots")
     return Verdict("APPROVED", reason, plan, calc)
 
 

@@ -89,11 +89,12 @@ class Runtime:
     position_count: int = -1
     last_daily_check: datetime | None = None
     last_status_push: datetime | None = None
+    model_warning: str | None = None
 
 
 class Engine:
     def __init__(self, *, config: ConfigManager, gateway: MT5Gateway, llm: Any, store: Store, news: NewsCalendar,
-                 clock: Clock, root: Path, sim: bool = False):
+                 clock: Clock, root: Path, sim: bool = False, read_only: bool = False):
         self.config = config
         self.gw = gateway
         self.llm = llm
@@ -102,6 +103,7 @@ class Engine:
         self.clock = clock
         self.root = Path(root)
         self.sim = sim
+        self.read_only = read_only  # `check` mode: never flattens, halts or sends anything
         self.bus = EventBus()
         self.rt = Runtime()
         self.stop_file = self.root / "STOP"
@@ -113,6 +115,7 @@ class Engine:
         self._running = False
         self.last_bars: dict[str, snap_mod.Bars] = {}
         self.last_snapshot: dict | None = None
+        self.forced_precheck: str | None = None
         magic = self.cfg.app.magic
         dev = lambda: self.cfg.risk.deviation_points  # noqa: E731
         self.live = LiveExecutor(gateway, store, magic, dev, self.server_time, gate=self.gate)
@@ -428,6 +431,8 @@ class Engine:
 
     async def kill(self, reason: str, source: str) -> dict:
         """Kill switch: close the bot's positions, cancel its orders, halt."""
+        if self.read_only:
+            return {"closed": 0, "cancelled": 0, "failed": 0}
         self.set_halt("kill_switch", reason)
         summary = await self.flatten("kill_switch")
         self.event("kill_switch", f"{reason} ({source}): closed {summary['closed']} position(s), cancelled {summary['cancelled']} order(s)", "warning", summary)
@@ -436,6 +441,8 @@ class Engine:
 
     async def flatten(self, reason: str) -> dict:
         closed = cancelled = failed = 0
+        if self.read_only:
+            return {"closed": 0, "cancelled": 0, "failed": 0}
         async with self._trade_lock:
             for ex in (self.paper, self.live):
                 if ex is self.live and not self.rt.connected:
@@ -538,6 +545,8 @@ class Engine:
         """Flatten and halt until 17:00 New York when the bot's loss today reaches the limit."""
         if (self.halt_state() or {}).get("kind") == "daily_limit":
             return True
+        if self.read_only:
+            return False
         pnl, sod = await self.day_pnl()
         limit = sod * self.cfg.risk.daily_loss_limit_pct / 100.0
         if sod > 0 and pnl <= -limit:
@@ -586,8 +595,11 @@ class Engine:
                 return None
             await asyncio.sleep(2)
 
-    async def process_bar(self, bar_open: datetime, wait: bool = True) -> int | None:
-        """Run one decision cycle for the M15 bar that opened at `bar_open`. Returns the decision id."""
+    async def process_bar(self, bar_open: datetime, wait: bool = True, force: bool = False) -> int | None:
+        """Run one decision cycle for the M15 bar that opened at `bar_open`. Returns the decision id.
+
+        `force` (used only by `check`) still reports a failed pre-check but calls the model anyway.
+        """
         cfg = self.cfg
         mode = self.mode
         now = self.clock.now()
@@ -619,8 +631,9 @@ class Engine:
             log.exception("Benchmark update failed")
 
         reason = await self.precheck(now)
-        if reason:
+        if reason and not force:
             return self.record_skip(bar_open, reason, mode)
+        self.forced_precheck = reason
 
         tick = await self.observe_tick()
         snapshot, state = await self.build_snapshot(bars, now, mode)
@@ -647,6 +660,12 @@ class Engine:
         finally:
             self.rt.thinking_since = None
         self.bus.publish("thinking", {"since": None, "decision_id": decision_id})
+        warning = None
+        if result.status == "error" and any(k in (result.error or "").lower() for k in ("api_key", "api key", "authentication", "401", "403", "credit")):
+            warning = f"Opus can't be reached ({result.error}). Check ANTHROPIC_API_KEY in .env; bars are treated as HOLD."
+        if warning != self.rt.model_warning:
+            self.rt.model_warning = warning
+            self.push_banner()
 
         row: dict[str, Any] = {
             "model": result.model, "stop_reason": result.stop_reason, "llm_status": result.status, "error": result.error,
@@ -749,7 +768,7 @@ class Engine:
             pos, pend = await self.mt(self.live.position), await self.mt(self.live.pending)
         return RiskState(equity=await self.equity_now(), position=pos, pending=pend, entries_today=self.entries_today(),
                          cooldown_bars_left=self.cooldown_left(now), entry_block=self.entry_block(now),
-                         recent_flip_direction=signal.get("recent_flip_direction"))
+                         recent_flip_direction=signal.get("recent_flip_direction"), currency=self.rt.account.get("currency", "EUR"))
 
     async def build_snapshot(self, bars: dict[str, snap_mod.Bars], now: datetime, mode: str) -> tuple[snap_mod.Snapshot, RiskState]:
         cfg = self.cfg
@@ -956,6 +975,8 @@ class Engine:
             out.append({"level": "warning", "text": "MT5 has no connection to the broker. Trading is paused."})
         elif not self.rt.algo_on:
             out.append({"level": "warning", "text": "Algo Trading is off in MT5. Turn it on in the terminal toolbar to resume."})
+        if self.rt.model_warning:
+            out.append({"level": "warning", "text": self.rt.model_warning})
         return out
 
     def status(self) -> dict:
