@@ -7,6 +7,7 @@
   const S = { filter: "all", q: "", items: [], next: null, loading: false, open: new Set(), details: new Map(), holds: 0, focus: null };
   let searchTimer = null;
 
+  const cur = () => (Opus.state && Opus.state.kpis && Opus.state.kpis.currency) || "EUR";
   const EXIT = { sl: "Stop-loss", tp: "Take-profit", model: "Closed by Opus", kill_switch: "Kill switch", weekend: "Weekend flat", daily_limit: "Daily loss limit", manual: "Closed in MT5", stop_out: "Stop out", broker: "Closed by broker" };
 
   async function load(reset) {
@@ -89,7 +90,7 @@
         <div class="jhead" tabindex="0" role="button" aria-expanded="${open}">
           <span class="t num">${fmt.hm(it.time)}</span><span class="a">TRADE</span>
           <span class="s">${side} closed · ${fmt.esc(EXIT[it.exit_reason] || it.exit_reason || "")}${it.setup ? ` · <span class="muted">${fmt.esc(it.setup)}</span>` : ""}</span>
-          <span class="end num"><span class="${fmt.cls(it.r)}">${fmt.r(it.r)}</span><span class="${fmt.cls(it.pnl)}">${fmt.money(it.pnl, "EUR", true)}</span>${dry}</span>
+          <span class="end num"><span class="${fmt.cls(it.r)}">${fmt.r(it.r)}</span><span class="${fmt.cls(it.pnl)}">${fmt.money(it.pnl, cur(), true)}</span>${dry}</span>
           <span class="chev" aria-hidden="true">›</span>
         </div>${open ? '<div class="jdetail"></div>' : ""}</div>`;
     }
@@ -157,7 +158,7 @@
     return `<div><h3>Trade</h3><div class="facts num">
       ${fact("Side", t.side === "long" ? "▲ Long" : "▼ Short")}${fact("Lots", fmt.num(t.volume, 2))}
       ${fact("Open", `${fmt.price(t.open_price)} at ${fmt.dayTime(t.open_time)} UTC`)}${fact("Close", `${fmt.price(t.close_price)} at ${fmt.dayTime(t.time)} UTC`)}
-      ${fact("Result", `<span class="${fmt.cls(t.r)}">${fmt.r(t.r)}</span> · <span class="${fmt.cls(t.pnl)}">${fmt.money(t.pnl, "EUR", true)}</span>`)}
+      ${fact("Result", `<span class="${fmt.cls(t.r)}">${fmt.r(t.r)}</span> · <span class="${fmt.cls(t.pnl)}">${fmt.money(t.pnl, cur(), true)}</span>`)}
       ${fact("Exit", fmt.esc(EXIT[t.exit_reason] || t.exit_reason || ""))}</div></div>
       ${t.decision_id ? `<div><button class="link" data-open-decision="${t.decision_id}" type="button">Show the decision that opened it</button></div>` : ""}`;
   }
@@ -184,7 +185,7 @@
     }
     const c = (d.risk && d.risk.calc) || {};
     const verdictText = { APPROVED: "Approved", REJECTED: "Rejected", HOLD: "Hold (no order)", NO_DECISION: "No decision", FAILED: "Order failed", ERROR: "Error", DISCARDED: "Discarded" }[d.verdict] || d.verdict;
-    const calc = c.stop_pips != null ? `${fact("Stop", `${fmt.num(c.stop_pips, 1)} pips (${fmt.num(c.stop_atr, 2)}× ATR)`)}${fact("R:R", fmt.num(c.rr, 2))}${c.lots ? fact("Size", `${fmt.num(c.lots, 2)} lots`) + fact("Risk", `${fmt.money(c.risk_eur, "EUR")} (${fmt.num(c.risk_pct, 2)}%)`) : ""}` : "";
+    const calc = c.stop_pips != null ? `${fact("Stop", `${fmt.num(c.stop_pips, 1)} pips (${fmt.num(c.stop_atr, 2)}× ATR)`)}${fact("R:R", fmt.num(c.rr, 2))}${c.lots ? fact("Size", `${fmt.num(c.lots, 2)} lots`) + fact("Risk", `${fmt.money(c.risk_eur, cur())} (${fmt.num(c.risk_pct, 2)}%)`) : ""}` : "";
     parts.push(`<div><h3>Risk engine</h3><p><span class="${d.verdict === "APPROVED" ? "" : d.verdict === "HOLD" ? "muted" : "warn"}">${verdictText}</span>${d.verdict_reason && d.verdict !== "HOLD" ? `: ${fmt.esc(d.verdict_reason)}` : ""}</p>${calc ? `<div class="facts num" style="margin-top:4px">${calc}</div>` : ""}</div>`);
     if ((d.orders || []).length) {
       parts.push(`<div><h3>Orders</h3>${d.orders.map((o) => `<p class="num" style="font-size:12px"><span class="${o.ok ? "" : "warn"}">${fmt.esc(o.purpose)}</span> · retcode ${o.retcode ?? "—"} ${fmt.esc(o.retcode_name || "")}${o.order_ticket ? ` · #${o.order_ticket}` : ""}${o.price ? ` · ${fmt.price(o.price)}` : ""}${o.volume ? ` · ${fmt.num(o.volume, 2)} lots` : ""} · ${fmt.esc(o.comment || "")}</p>`).join("")}</div>`);

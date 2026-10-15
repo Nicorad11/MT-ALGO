@@ -281,13 +281,21 @@ class PaperExecutor(BaseExecutor):
         self._log_order("check", decision_id, request, res, ok, comment=f"order_check for {purpose}: {res.comment}")
         return ok, res
 
+    def _check_with_filling(self, purpose: str, decision_id: int | None, build: Callable[[int], dict]) -> tuple[bool, Any, dict]:
+        """order_check with the same IOC -> FOK -> RETURN fallback the live executor uses."""
+        res = req = None
+        for filling in self.gw.filling_candidates():
+            req = build(filling)
+            ok, res = self._check(purpose, decision_id, req)
+            if ok or res.retcode != self.mt5.TRADE_RETCODE_INVALID_FILL:
+                return ok, res, req
+        return False, res, req
+
     def open(self, plan: Plan, decision_id: int | None, meta: dict | None = None) -> ExecResult:
         meta = meta or {}
-        filling = self.gw.filling_candidates()[0]
         if plan.kind == "OPEN_MARKET":
             tick = self.gw.tick()
-            req = self.market_request(plan, tick, decision_id, filling)
-            ok, res = self._check("open", decision_id, req)
+            ok, res, req = self._check_with_filling("open", decision_id, lambda f: self.market_request(plan, tick, decision_id, f))
             if not ok:
                 return ExecResult(False, f"order_check failed: {self.gw.retcode_name(res.retcode)} {res.comment}", res.retcode, self.gw.retcode_name(res.retcode))
             price = float(tick.ask if plan.side == "long" else tick.bid)
@@ -296,8 +304,8 @@ class PaperExecutor(BaseExecutor):
             self._log_order("open", decision_id, req, None, True, comment=f"Simulated fill at {price:.5f}",
                             retcode=0, retcode_name="PAPER", order_ticket=ticket, price=price, volume=plan.volume)
             return ExecResult(True, f"Simulated fill at {price:.5f}", 0, "PAPER", ticket, price)
-        req = self.limit_request(plan, decision_id, filling, specified_expiration=True)
-        ok, res = self._check("pending", decision_id, req)
+        specified = self.gw.supports_specified_expiration()
+        ok, res, req = self._check_with_filling("pending", decision_id, lambda f: self.limit_request(plan, decision_id, f, specified))
         if not ok:
             return ExecResult(False, f"order_check failed: {self.gw.retcode_name(res.retcode)} {res.comment}", res.retcode, self.gw.retcode_name(res.retcode))
         ticket = self._next_ticket()

@@ -29,13 +29,14 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ## 3. Check everything, then start
 
-You need Python 3.11–3.13 (64-bit) from python.org, with "Add python.exe to PATH" ticked.
+You need 64-bit Python 3.11–3.14 from python.org (3.13 recommended), with "Add python.exe to PATH" ticked. The launchers pick a suitable 64-bit Python by themselves and create a `.venv` folder with the dependencies on first use (about a minute, internet needed once).
 
-1. **Double-click `start.bat` once.** The first run creates a `.venv` folder and installs the dependencies, then opens the app.
-2. **Double-click `check.bat`.** It attaches to the terminal and prints what Opus Trader relies on: account and server, demo and hedging, currency, Algo Trading, the EURUSD specification (tick value and size, volume min/step/max, stops and freeze level, filling and expiration modes), and the detected broker time. Then it runs **one real dry-run cycle** on the last closed bar: a real snapshot, a real Opus call, the risk engine and `order_check` on the order it would send. Nothing is sent to MT5, and the cycle is stored in `data/check.sqlite`, not your journal.
-3. From then on, **double-click `start.bat`** to run the bot. The app opens in its own window. If the window can't open (no WebView2 runtime), the UI opens in your browser instead.
+1. **Double-click `check.bat`.** It attaches to the terminal and prints what Opus Trader relies on: account and server, demo and hedging, currency, Algo Trading, the EURUSD specification (tick value and size, volume min/step/max, stops and freeze level, filling and expiration modes), and the detected broker time. Then it runs **one real dry-run cycle** on the last closed bar: a real snapshot, a real Opus call, the risk engine and `order_check` on the order it would send. Nothing is sent to MT5, and the cycle is stored in `data/check.sqlite`, not your journal.
+2. **Double-click `start.bat`** to run the bot. The app opens in its own window. If the window can't open (no WebView2 runtime), the UI opens in your browser instead.
 
-Closing the window asks **"Stop the bot and exit?"** Open positions keep their stop-loss and take-profit at the broker.
+Closing the window asks **"Stop the bot and exit?"** Open positions keep their stop-loss and take-profit at the broker. Only one Opus Trader runs at a time: starting it again while it's open is refused, so two bots never manage the same account.
+
+If your broker names the symbol with a suffix (for example `EURUSD.pro`), Opus Trader finds and uses it; `check.bat` shows the name it picked. The broker's server clock (New York + 7, or a European zone such as Warsaw time) is detected from live ticks, with daylight saving handled.
 
 ## 4. Dry run, and turning it off
 

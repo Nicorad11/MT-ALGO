@@ -49,6 +49,56 @@ def load_env() -> None:
     load_dotenv(ROOT / ".env")
 
 
+class InstanceLock:
+    """One Opus Trader per data folder, so two bots never manage the same account.
+
+    An OS file lock: released automatically if the process dies, so a crash
+    never leaves a stale lock behind.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.fh = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(self.path, "a+", encoding="utf-8")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return False
+        self.fh = fh
+        return True
+
+    def note(self, text: str) -> None:
+        """Record where this instance can be reached (read by a second start)."""
+        info = self.path.with_suffix(".info")
+        info.write_text(text, encoding="utf-8")
+
+    def holder(self) -> str:
+        try:
+            return self.path.with_suffix(".info").read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+
+def already_running(lock: InstanceLock) -> int:
+    where = lock.holder()
+    print("\nOpus Trader is already running" + (f" ({where})" if where else "") + ".\n"
+          "This second start was stopped so two bots never trade the same account.\n"
+          "Switch to the open Opus Trader window, or close it first.\n", flush=True)
+    return 2
+
+
 def free_port(preferred: int) -> int:
     for port in [preferred] + list(range(preferred + 1, preferred + 20)):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -151,9 +201,13 @@ class ServerThread(threading.Thread):
 
 def run_app(args) -> int:
     load_env()
+    lock = InstanceLock((DATA / "sim" if args.sim else DATA) / "opus_trader.lock")
+    if not lock.acquire():
+        return already_running(lock)
     setup_logging((DATA / "sim" / "logs") if args.sim else (DATA / "logs"), args.verbose)
     engine, sim_env = build_engine(args)
     port = free_port(args.port or engine.cfg.app.server_port)
+    lock.note(f"http://127.0.0.1:{port}/")
     token = secrets.token_urlsafe(24)
     window_holder: dict = {}
 
@@ -221,6 +275,9 @@ def wait_for_ctrl_c(thread: ServerThread) -> int:
 def run_once(args) -> int:
     """Run a single decision cycle on the last closed bar and print it."""
     load_env()
+    lock = InstanceLock((DATA / "sim" if args.sim else DATA) / "opus_trader.lock")
+    if not lock.acquire():
+        return already_running(lock)
     setup_logging((DATA / "sim" / "logs") if args.sim else (DATA / "logs"), args.verbose)
     engine, sim_env = build_engine(args)
 

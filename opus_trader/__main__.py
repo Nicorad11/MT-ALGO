@@ -15,6 +15,12 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Never let a console that can't show "−" or "→" crash the bot (e.g. output redirected to a file on Windows).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(prog="opus_trader", description="Claude Opus 5.5 paper-trades EUR/USD on a MetaTrader 5 demo account.")
     p.add_argument("command", nargs="?", default="run", choices=["run", "check", "flips"])
     p.add_argument("--sim", action="store_true", help="preview against a simulated terminal and a rule-based stand-in for Opus")

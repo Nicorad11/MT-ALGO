@@ -122,3 +122,27 @@ def test_paper_limit_fill_and_expiry(paper, store, clock):
     assert paper.open(plan2, 10).ok
     assert paper.on_price(1.16000, 1.16008, clock.now() + timedelta(minutes=31)) == ["expired"]
     assert store.one("SELECT status FROM paper_orders WHERE decision_id=10")["status"] == "expired"
+
+
+def test_paper_check_falls_back_on_filling_mode(paper, fake):
+    fake.forced_retcodes = []
+    calls = []
+    real_check = fake.order_check
+
+    def check(req):
+        calls.append(req["type_filling"])
+        res = real_check(req)
+        return res._replace(retcode=fake.TRADE_RETCODE_INVALID_FILL, comment="Unsupported filling mode") if len(calls) == 1 else res
+
+    fake.order_check = check
+    res = paper.open(market_long(), 1)
+    assert res.ok
+    assert calls == [fake.ORDER_FILLING_IOC, fake.ORDER_FILLING_FOK]
+    assert fake.sent == []
+
+
+def test_paper_limit_uses_gtc_when_symbol_cannot_expire(paper, fake, clock):
+    fake.spec.expiration_mode = 1  # GTC only
+    plan = Plan("OPEN_LIMIT", "long", 0.2, 1.15900, 1.15700, 1.16300, expiration=clock.now() + timedelta(hours=1))
+    assert paper.open(plan, 9).ok
+    assert fake.checked[-1]["type_time"] == fake.ORDER_TIME_GTC
