@@ -1,0 +1,12 @@
+# Runtime dependencies (Windows, Python 3.11-3.13, 64-bit)
+MetaTrader5>=5.0.5200; sys_platform == "win32"
+pywebview>=6.0; sys_platform == "win32"
+anthropic>=1.14,<2
+fastapi>=0.115
+uvicorn>=0.30
+sse-starlette>=2.1
+pydantic>=2.7
+pyyaml>=6.0
+python-dotenv>=1.0
+numpy>=1.26
+tzdata>=2024.1

@@ -1,0 +1,13 @@
+# Local environment and secrets
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime data (SQLite journal, logs, kill switch)
+data/
+STOP
+
+# Screenshots from UI verification
+screenshots/

@@ -1,0 +1,19 @@
+# High-impact economic events for the news blackout (times in UTC).
+#
+# Opus Trader makes no model calls from `blackout_before_min` before to
+# `blackout_after_min` after each event (Settings > News). Only events whose
+# currency is listed in news.currencies (USD, EUR) and whose impact is "high"
+# count. Add the week's events from your usual calendar, for example:
+#
+#   - time: "2026-10-16T12:30:00Z"
+#     currency: USD
+#     impact: high
+#     title: Retail Sales
+#
+#   - time: "2026-10-29T13:15:00Z"
+#     currency: EUR
+#     impact: high
+#     title: ECB rate decision
+#
+# The file is re-read every bar, so edits take effect without a restart.
+events: []
