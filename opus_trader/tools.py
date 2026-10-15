@@ -82,7 +82,7 @@ def run_check(args) -> int:
     try:
         acct_id = gw.connect()
     except SafetyError as exc:
-        line("Account", exc.message, False)
+        line("Symbol" if exc.code == "symbol" else "Account", exc.message, False)
         return 1
     except NotConnected as exc:
         line("MT5", f"{exc}. Is the terminal open and logged in?", False)
@@ -100,7 +100,9 @@ def run_check(args) -> int:
     line("Algo Trading", "on" if ti.trade_allowed else "OFF (turn it on in the toolbar)", bool(ti.trade_allowed))
 
     info = gw.symbol_info()
-    print(f"\n{cfg.app.symbol} specification")
+    print(f"\n{gw.symbol} specification")
+    if gw.symbol != cfg.app.symbol:
+        line("Symbol name", f"{gw.symbol} (config says {cfg.app.symbol}; this broker adds a suffix, which is handled)", True)
     line("Digits / point", f"{info.digits} / {info.point}")
     line("Tick size / tick value", f"{info.trade_tick_size} / {info.trade_tick_value:.4f} {acct.currency} (loss {getattr(info, 'trade_tick_value_loss', 0):.4f})")
     line("Volume min / step / max", f"{info.volume_min} / {info.volume_step} / {info.volume_max}")
@@ -119,7 +121,7 @@ def run_check(args) -> int:
     m = st.model
     print("\nBroker time")
     if m.detected:
-        line("Server time", "New York + 7 h (UTC+2 winter / UTC+3 summer, DST-aware)" if m.mode == "ny7" else f"fixed UTC{m.seconds / 3600:+g} h", True)
+        line("Server time", m.describe(), True)
     else:
         line("Server time", "not detected (market closed?). Assuming New York + 7 h until the first live tick.", None)
     gw.shutdown()
@@ -200,7 +202,7 @@ def run_flips(args) -> int:
         gw.shutdown()
         times = [b.time(i) for i in range(len(b))]
         h, lo, c = b.h, b.l, b.c
-        source = f"MT5 {cfg.app.symbol} M15, last {len(b)} closed bars"
+        source = f"MT5 {gw.symbol} M15, last {len(b)} closed bars"
     if len(c) < 1000:
         print(f"Warning: only {len(c)} bars; use at least 1000 so the ATR matches TradingView.")
     s = ts.compute(h, lo, c, sc.atr_length, sc.multiplier, sc.atr_method)

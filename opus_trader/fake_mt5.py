@@ -18,7 +18,9 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from .clock import Clock, fx_market_open, ny7_offset_s
+import fnmatch
+
+from .clock import Clock, OffsetModel, ServerTime, fx_market_open, ny7_offset_s
 
 UTC = timezone.utc
 
@@ -275,6 +277,7 @@ class FakeMT5:
         balance: float = 10000.0,
         leverage: int = 30,
         spec: SymbolSpec | None = None,
+        server_tz: str = "ny7",
     ):
         g = globals()
         for name, value in g.items():
@@ -306,17 +309,22 @@ class FakeMT5:
         self._processed_until: float = clock.epoch()
         self._last_error = (RES_S_OK, "Success")
         self.price_override: tuple[float, float] | None = None  # (bid, ask) for tests
+        # Broker server clock: "ny7" (New York + 7 h) or an IANA zone such as "Europe/Warsaw".
+        self.server_model = OffsetModel("ny7") if server_tz == "ny7" else OffsetModel("tz", tz=server_tz)
+        if server_tz == "ny7":
+            self._server_times = market.server_times
+        else:
+            hours = market.times // 3600
+            uniq, inv = np.unique(hours, return_inverse=True)
+            offs = np.array([self.server_model.offset_at(datetime.fromtimestamp(int(h) * 3600, UTC)) for h in uniq], dtype=np.int64)
+            self._server_times = market.times + offs[inv]
 
     # ------------------------------------------------------------ helpers
     def _server_epoch(self, utc_epoch: float) -> int:
-        return int(utc_epoch) + ny7_offset_s(datetime.fromtimestamp(utc_epoch, UTC))
+        return int(utc_epoch) + self.server_model.offset_at(datetime.fromtimestamp(utc_epoch, UTC))
 
     def _utc_epoch_from_server(self, server_epoch: float) -> float:
-        for guess in (3 * 3600, 2 * 3600):
-            t = server_epoch - guess
-            if ny7_offset_s(datetime.fromtimestamp(t, UTC)) == guess:
-                return t
-        return server_epoch - 7200
+        return ServerTime(self.server_model).to_utc(server_epoch).timestamp()
 
     def _alive(self) -> bool:
         if not self.initialized or not self.ipc_ok:
@@ -462,6 +470,19 @@ class FakeMT5:
         return AccountInfo(self.login, self.trade_mode, self.leverage, 200, 0, True, True, self.margin_mode, 2, False,
                            self.balance, 0.0, round(profit, 2), equity, round(margin, 2), free, level, "Demo User", self.server, self.currency, self.company)
 
+    def symbols_get(self, group: str | None = None):
+        """Symbols matching an MT5 group filter ("*EURUSD*", comma lists, "!" exclusions)."""
+        if not self._alive():
+            return None
+        if group:
+            pats = [g.strip() for g in group.split(",") if g.strip()]
+            inc = [p for p in pats if not p.startswith("!")] or ["*"]
+            exc = [p[1:] for p in pats if p.startswith("!")]
+            ok = any(fnmatch.fnmatchcase(self.spec.name, p) for p in inc) and not any(fnmatch.fnmatchcase(self.spec.name, p) for p in exc)
+            if not ok:
+                return ()
+        return (self.symbol_info(self.spec.name),)
+
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         if not self._alive():
             return False
@@ -523,7 +544,7 @@ class FakeMT5:
         if i1 <= i0:
             return np.zeros(0, dtype=RATE_DTYPE)
         o, h, lo, c = mk.m1(i0, i1, upto_epoch=upto)
-        server_times = mk.server_times[i0:i1]
+        server_times = self._server_times[i0:i1]
         bucket = server_times // (minutes * 60) * (minutes * 60)
         starts = np.flatnonzero(np.r_[True, bucket[1:] != bucket[:-1]])
         ends = np.r_[starts[1:], len(bucket)]

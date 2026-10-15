@@ -75,7 +75,8 @@ def _to_dict(rec: Any) -> dict:
 class MT5Gateway:
     def __init__(self, mt5: Any, symbol: str, magic: int, terminal_path: str | None = None):
         self.mt5 = mt5
-        self.symbol = symbol
+        self.configured_symbol = symbol
+        self.symbol = symbol  # resolved on connect (a broker may name it EURUSD.pro, EURUSDm, ...)
         self.magic = magic
         self.terminal_path = terminal_path or None
         self.lock = threading.RLock()
@@ -98,13 +99,30 @@ class MT5Gateway:
             except SafetyError:
                 self.mt5.shutdown()
                 raise
-            if not self.mt5.symbol_select(self.symbol, True):
-                raise NotConnected(f"symbol_select({self.symbol}) failed: {self.mt5.last_error()}")
+            self.symbol = self._resolve_symbol()
             if self.mt5.symbol_info(self.symbol) is None:
                 raise NotConnected(f"No symbol info for {self.symbol}")
             self.account_id = AccountId(acct.login, acct.server, acct.company, acct.name, acct.currency, acct.trade_mode, acct.margin_mode, acct.leverage)
             log.info("Attached to MT5: account %s on %s (%s)", acct.login, acct.server, acct.currency)
             return self.account_id
+
+    def _resolve_symbol(self) -> str:
+        """The configured symbol, or its only broker variant (EURUSD -> EURUSD.pro)."""
+        wanted = self.configured_symbol
+        if self.mt5.symbol_select(wanted, True):
+            return wanted
+        found = self.mt5.symbols_get(group=f"*{wanted}*") or ()
+        names = sorted({s.name for s in found if s.name.upper().startswith(wanted.upper())})
+        visible = [s.name for s in found if s.name in names and getattr(s, "visible", False)]
+        pick = names[0] if len(names) == 1 else visible[0] if len(visible) == 1 else None
+        if pick and self.mt5.symbol_select(pick, True):
+            if pick != wanted:
+                log.info("Symbol %s is called %s at this broker; using %s", wanted, pick, pick)
+            return pick
+        if names:
+            raise SafetyError("symbol", f"{wanted} isn't in this MT5 terminal, but these are: {', '.join(names)}. "
+                                        f"Set app.symbol in config.yaml to the one you trade, then restart.", fatal=True)
+        raise SafetyError("symbol", f"No symbol like {wanted} in this MT5 terminal. Check app.symbol in config.yaml, then restart.", fatal=True)
 
     def _check_account(self, acct: Any, expected_login: int | None) -> None:
         mt5 = self.mt5

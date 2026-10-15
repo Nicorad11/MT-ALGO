@@ -28,11 +28,12 @@ def market(seed: int = 3):
 
 
 class Env:
-    def __init__(self, tmp: Path, script=None, now: datetime = NOW, dry_run: bool = True, store: Store | None = None, events: str = "events: []\n"):
+    def __init__(self, tmp: Path, script=None, now: datetime = NOW, dry_run: bool = True, store: Store | None = None, events: str = "events: []\n",
+                 server_tz: str = "ny7"):
         self.tmp = tmp
         (tmp / "events.yaml").write_text(events)
         self.clock = SimClock(now)
-        self.fake = FakeMT5(self.clock, market())
+        self.fake = FakeMT5(self.clock, market(), server_tz=server_tz)
         self.gw = MT5Gateway(self.fake, "EURUSD", MAGIC)
         self.store = store or Store(":memory:")
         self.config = ConfigManager(persist=False, store=self.store)

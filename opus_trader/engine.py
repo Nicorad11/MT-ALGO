@@ -107,7 +107,9 @@ class Engine:
         self.bus = EventBus()
         self.rt = Runtime()
         self.stop_file = self.root / "STOP"
-        self.server_time = ServerTime(OffsetModel.from_dict(store.get_state("server_offset")))
+        restored = OffsetModel.from_dict(store.get_state("server_offset"))
+        restored.detected = False  # re-confirmed from a live tick every session (DST may have changed meanwhile)
+        self.server_time = ServerTime(restored)
         self.spec: SymbolSpec | None = None
         self._mt_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5")
         self._trade_lock = asyncio.Lock()
@@ -262,7 +264,7 @@ class Engine:
         changed = self.server_time.observe_tick(int(tick.time), self.clock.now())
         if changed:
             self.store.set_state("server_offset", changed.to_dict())
-            self.event("server_time", f"Broker server time detected: {'New York + 7 h (DST-aware)' if changed.mode == 'ny7' else f'UTC{changed.seconds / 3600:+g} h'}")
+            self.event("server_time", f"Broker server time detected: {changed.describe()}")
         self.rt.tick_time = self.server_time.to_utc(int(tick.time))
         return tick
 
@@ -612,6 +614,12 @@ class Engine:
             return None
         try:
             await self.observe_tick()
+            if not self.server_time.model.detected and not force:
+                # Bar times depend on the broker's clock: confirm it from a live tick first.
+                await asyncio.sleep(1.5)
+                await self.observe_tick()
+                if not self.server_time.model.detected:
+                    return self.record_skip(bar_open, "Waiting for a live tick to confirm the broker's server time", mode) if fx_market_open(now) else None
             bars = await self.wait_for_bar(bar_open, wait)
         except NotConnected as exc:
             self.lost_connection(str(exc))
@@ -813,7 +821,7 @@ class Engine:
         decs = self.store.query("SELECT bar_time, action, verdict, reasoning FROM decisions WHERE mode=? AND status='CALLED' AND reasoning IS NOT NULL ORDER BY id DESC LIMIT 3", (mode,))
         last_rej = self.store.get_state(f"last_rejection:{mode}")
         x = snap_mod.SnapshotInputs(
-            bar_time=bars["M15"].time(-1), now=now, symbol=cfg.app.symbol, digits=self.spec.digits, point=self.spec.point,
+            bar_time=bars["M15"].time(-1), now=now, symbol=self.gw.symbol, digits=self.spec.digits, point=self.spec.point,
             m15=bars["M15"], h1=bars["H1"], h4=bars["H4"], bid=self.rt.bid, ask=self.rt.ask, mode=mode, currency=self.rt.account.get("currency", "EUR"),
             balance=balance, equity=equity, today_pnl=pnl, sod_equity=sod, position=position, pending=pending, recent_trades=recent_trades,
             recent_decisions=decs, last_rejection=last_rej, events=self.news.upcoming(now, 4),
@@ -1004,7 +1012,7 @@ class Engine:
             "thinking_since": fmt_utc(self.rt.thinking_since),
             "connected": self.rt.connected, "broker_connected": self.rt.broker_connected, "algo_on": self.rt.algo_on,
             "bid": self.rt.bid, "ask": self.rt.ask, "spread_pips": self.spread_pips(),
-            "stop_file": self.stop_file.exists(), "account": self.rt.account, "symbol": self.cfg.app.symbol,
+            "stop_file": self.stop_file.exists(), "account": self.rt.account, "symbol": self.gw.symbol,
             "next_event": None if nxt is None else nxt.to_dict(self.clock.now()),
             "banners": self.banners(),
         }

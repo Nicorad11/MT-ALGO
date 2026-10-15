@@ -67,20 +67,59 @@ def ny7_offset_s(t_utc: datetime) -> int:
     return ny_utc_offset_s(t_utc) + 7 * 3600
 
 
+# Broker server clocks seen on MT5, in order of preference when several match the
+# current offset: New York + 7 h (most brokers), then European zones with EU DST
+# rules (OANDA TMS is a Warsaw-based broker), then London.
+ZONE_MODELS = ("Europe/Athens", "Europe/Warsaw", "Europe/London")
+
+
+def zone_offset_s(tz: str, t_utc: datetime) -> int:
+    return int(t_utc.astimezone(ZoneInfo(tz)).utcoffset().total_seconds())
+
+
 @dataclass
 class OffsetModel:
-    mode: str  # "ny7" or "fixed"
+    mode: str  # "ny7", "tz" (an IANA zone with its DST rules) or "fixed"
     seconds: int = 0  # used when mode == "fixed"
     detected: bool = False  # False when assumed (no fresh tick seen yet)
+    tz: str | None = None  # used when mode == "tz"
 
     def to_dict(self) -> dict:
-        return {"mode": self.mode, "seconds": self.seconds, "detected": self.detected}
+        return {"mode": self.mode, "seconds": self.seconds, "detected": self.detected, "tz": self.tz}
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "OffsetModel":
         if not d:
             return cls("ny7", 0, False)
-        return cls(d.get("mode", "ny7"), int(d.get("seconds", 0)), bool(d.get("detected", False)))
+        return cls(d.get("mode", "ny7"), int(d.get("seconds", 0)), bool(d.get("detected", False)), d.get("tz"))
+
+    def offset_at(self, t_utc: datetime) -> int:
+        if self.mode == "ny7":
+            return ny7_offset_s(t_utc)
+        if self.mode == "tz" and self.tz:
+            return zone_offset_s(self.tz, t_utc)
+        return self.seconds
+
+    def describe(self) -> str:
+        if self.mode == "ny7":
+            return "New York + 7 h (UTC+2 winter / UTC+3 summer, US DST dates)"
+        if self.mode == "tz":
+            return f"{self.tz} time (with its DST rules)"
+        return f"fixed UTC{self.seconds / 3600:+g} h"
+
+    def same(self, other: "OffsetModel") -> bool:
+        return (self.mode, self.seconds, self.tz) == (other.mode, other.seconds, other.tz)
+
+
+def candidate_models(offset_s: int, now_utc: datetime) -> list[OffsetModel]:
+    """Known server-clock models whose offset right now equals `offset_s`, best first."""
+    out = []
+    if ny7_offset_s(now_utc) == offset_s:
+        out.append(OffsetModel("ny7", 0, True))
+    for tz in ZONE_MODELS:
+        if zone_offset_s(tz, now_utc) == offset_s:
+            out.append(OffsetModel("tz", 0, True, tz))
+    return out
 
 
 class ServerTime:
@@ -89,19 +128,19 @@ class ServerTime:
         self._last_tick_time: int | None = None
 
     def offset_at(self, t_utc: datetime) -> int:
-        if self.model.mode == "ny7":
-            return ny7_offset_s(t_utc)
-        return self.model.seconds
+        return self.model.offset_at(t_utc)
 
     def current_offset(self, now_utc: datetime) -> int:
         return self.offset_at(now_utc)
 
     def observe_tick(self, tick_time: int, now_utc: datetime) -> OffsetModel | None:
-        """Feed the latest tick's server time. Returns a new model if it changed.
+        """Feed the latest tick's server time. Returns the new model if it changed.
 
-        A tick is trusted when the implied offset matches the NY+7 convention
-        (a stale tick would not land exactly on it), or when the tick time has
-        advanced since the previous observation (the market is live).
+        The implied offset (rounded to 30 min) is matched against known broker
+        clocks so DST is handled for history too. The current model is kept while
+        it still matches. Switching to a different model needs a fresh tick (the
+        tick time advanced since the last look, so the market is live), except
+        for the very first detection when the offset is exactly New York + 7.
         """
         if tick_time is None or tick_time <= 0:
             return None
@@ -111,23 +150,31 @@ class ServerTime:
         candidate = int(round(raw / HALF_HOUR)) * HALF_HOUR
         if abs(candidate) > MAX_OFFSET_S or abs(raw - candidate) > MAX_TICK_SKEW_S:
             return None
-        matches_ny7 = candidate == ny7_offset_s(now_utc)
-        if not (matches_ny7 or fresh):
+        if self.model.offset_at(now_utc) == candidate:
+            if self.model.detected:
+                return None
+            if fresh or self.model.mode == "ny7":
+                self.model = OffsetModel(self.model.mode, self.model.seconds, True, self.model.tz)
+                return self.model
             return None
-        new = OffsetModel("ny7", 0, True) if matches_ny7 else OffsetModel("fixed", candidate, True)
-        if (new.mode, new.seconds) != (self.model.mode, self.model.seconds) or not self.model.detected:
-            self.model = new
-            return new
-        return None
+        models = candidate_models(candidate, now_utc)
+        first_ny7 = not self.model.detected and models and models[0].mode == "ny7"
+        if not (fresh or first_ny7):
+            return None
+        self.model = models[0] if models else OffsetModel("fixed", candidate, True)
+        return self.model
 
     def to_utc(self, server_epoch: float) -> datetime:
         if self.model.mode == "fixed":
             return datetime.fromtimestamp(server_epoch - self.model.seconds, UTC)
-        for guess in (3 * 3600, 2 * 3600):
+        # Server time is local time in the model's zone: try each plausible offset.
+        # DST changes at most once a day, so the offsets in force 12 h either side cover every case.
+        guesses = sorted({self.model.offset_at(datetime.fromtimestamp(server_epoch + d, UTC)) for d in (-12 * 3600, 0, 12 * 3600)})
+        for guess in guesses:
             t = datetime.fromtimestamp(server_epoch - guess, UTC)
-            if ny7_offset_s(t) == guess:
+            if self.model.offset_at(t) == guess:
                 return t
-        return datetime.fromtimestamp(server_epoch - 2 * 3600, UTC)
+        return datetime.fromtimestamp(server_epoch - guesses[0], UTC)
 
     def to_server_epoch(self, t_utc: datetime) -> int:
         return int(t_utc.timestamp()) + self.offset_at(t_utc)
