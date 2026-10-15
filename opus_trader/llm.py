@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -204,6 +205,16 @@ def parse_response(resp: Any, cfg: Config, latency_ms: int) -> LLMResult:
     return LLMResult("ok", decision, **base)
 
 
+def key_problem(api_key: str | None) -> str | None:
+    """Why the configured API key can't work, or None if it looks usable."""
+    key = (api_key or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        return None if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "ANTHROPIC_API_KEY is not set"
+    if key.endswith("...") or key == "sk-ant-":
+        return "ANTHROPIC_API_KEY is still the placeholder from .env.example"
+    return None
+
+
 class OpusClient:
     """Calls the Claude API. Never raises: failures come back as an LLMResult."""
 
@@ -211,11 +222,14 @@ class OpusClient:
         import anthropic
 
         self._anthropic = anthropic
+        self.key_problem = key_problem(api_key)
         self.client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else anthropic.AsyncAnthropic()
 
     async def decide(self, request: dict, cfg: Config) -> LLMResult:
         a = self._anthropic
         t0 = time.monotonic()
+        if getattr(self, "key_problem", None):
+            return LLMResult("error", latency_ms=0, error=self.key_problem)
         timeout = float(cfg.model.timeout_s)
         try:
             # timeout_s bounds the whole call, including the SDK's one retry.

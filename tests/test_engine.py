@@ -240,3 +240,15 @@ def test_benchmark_never_touches_mt5(tmp_path):
         assert env.store.one("SELECT COUNT(*) n FROM bench_equity")["n"] >= 1
     finally:
         env.close()
+
+
+def test_missing_api_key_warns_from_the_start(tmp_path):
+    env = Env(tmp_path, script=[HOLD])
+    try:
+        env.llm.key_problem = "ANTHROPIC_API_KEY is not set"
+        env.run(env.engine.start(run_tasks=False))
+        assert any(b["text"].startswith("ANTHROPIC_API_KEY is not set.") for b in env.engine.banners())
+        env.bar()
+        assert any(b["text"].startswith("ANTHROPIC_API_KEY is not set.") for b in env.engine.banners())
+    finally:
+        env.close()

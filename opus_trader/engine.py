@@ -164,9 +164,16 @@ class Engine:
         self.store.log_event(kind, message, level, data)
 
     # ------------------------------------------------------------ lifecycle
+    def key_warning(self) -> str | None:
+        problem = getattr(self.llm, "key_problem", None)
+        return f"{problem}. Put your key in .env and restart Opus Trader; until then every bar is a HOLD." if problem else None
+
     async def start(self, run_tasks: bool = True) -> None:
         self.rt.started_at = self.clock.now()
         self._running = True
+        self.rt.model_warning = self.key_warning()
+        if self.rt.model_warning:
+            log.warning(self.rt.model_warning)
         await self.ensure_connected(force=True)
         if self.rt.connected:
             await self.safe_reconcile()
@@ -671,8 +678,8 @@ class Engine:
         finally:
             self.rt.thinking_since = None
         self.bus.publish("thinking", {"since": None, "decision_id": decision_id})
-        warning = None
-        if result.status == "error" and any(k in (result.error or "").lower() for k in ("api_key", "api key", "authentication", "401", "403", "credit")):
+        warning = self.key_warning()
+        if not warning and result.status == "error" and any(k in (result.error or "").lower() for k in ("api_key", "api key", "authentication", "401", "403", "credit")):
             warning = f"Opus can't be reached ({result.error}). Check ANTHROPIC_API_KEY in .env; bars are treated as HOLD."
         if warning != self.rt.model_warning:
             self.rt.model_warning = warning

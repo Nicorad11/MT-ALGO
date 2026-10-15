@@ -126,8 +126,11 @@ def run_check(args) -> int:
         line("Server time", "not detected (market closed?). Assuming New York + 7 h until the first live tick.", None)
     gw.shutdown()
 
-    if not (os.environ.get("ANTHROPIC_API_KEY")):
-        print("\n  !! ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key, then run check again.")
+    from .llm import key_problem
+
+    problem = key_problem(os.environ.get("ANTHROPIC_API_KEY"))
+    if problem:
+        print(f"\n  !! {problem}. Copy .env.example to .env and put your key in it, then run check again.")
         return 1
 
     print("\nOne dry-run cycle on the last closed M15 bar (real snapshot, real Opus call, risk engine, order_check)...")

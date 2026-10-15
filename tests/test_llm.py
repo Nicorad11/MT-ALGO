@@ -8,7 +8,7 @@ import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
 from opus_trader.config import Config, apply_changes
-from opus_trader.llm import TOOL, FakeLLM, OpusClient, build_request, cost_usd, parse_response, system_prompt
+from opus_trader.llm import TOOL, FakeLLM, OpusClient, build_request, cost_usd, key_problem, parse_response, system_prompt
 
 DECISION = {"action": "OPEN_LONG", "order_type": "MARKET", "entry": None, "stop_loss": 1.15808, "take_profit": 1.16408,
             "confidence": 4, "setup": "Asian range breakout", "reasoning": "Clean break.", "invalidation": "Close back inside the range."}
@@ -151,3 +151,13 @@ def test_fake_llm_script():
     cfg = Config()
     out = [asyncio.run(fake.decide({}, cfg)) for _ in range(4)]
     assert [r.status for r in out] == ["ok", "timeout", "refusal", "no_decision"]
+
+
+def test_missing_or_placeholder_key_is_reported_without_a_call(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    assert key_problem(None) == "ANTHROPIC_API_KEY is not set"
+    assert key_problem("sk-ant-...") == "ANTHROPIC_API_KEY is still the placeholder from .env.example"
+    assert key_problem("sk-ant-api03-abc") is None
+    r = asyncio.run(OpusClient(None).decide(request(), Config()))
+    assert r.status == "error" and r.error == "ANTHROPIC_API_KEY is not set"
