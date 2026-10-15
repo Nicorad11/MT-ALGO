@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="opus-token" content="{{TOKEN}}">
+  <title>Opus Trader</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2316181C'/%3E%3Cpath d='M7 21l6-6 4 4 8-9' fill='none' stroke='%235B8DEF' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css?v={{VERSION}}">
+  <script>
+    // Apply the saved theme before first paint.
+    try { const t = localStorage.getItem("opus-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">Opus Trader</span>
+      <span class="muted" id="symbol-label">EURUSD · M15</span>
+    </div>
+    <div class="topbar-center">
+      <span class="pill" id="status-pill" data-state="starting"><span class="pill-dot" aria-hidden="true"></span><span id="status-text">Starting…</span></span>
+    </div>
+    <div class="topbar-right">
+      <span class="badge" id="badge-account" data-tip="Opus Trader only runs on MT5 demo accounts.">DEMO</span>
+      <span class="badge badge-warning" id="badge-dry" data-tip="Dry run: approved trades are simulated at live prices. Nothing is sent to MT5.">DRY RUN</span>
+      <span class="countdown num" id="countdown" data-tip="Time until the next M15 candle closes and Opus is asked for a decision.">Next bar --:--</span>
+      <button class="btn" id="btn-pause" type="button">Pause</button>
+      <button class="btn btn-danger-outline" id="btn-stop" type="button">Stop</button>
+    </div>
+  </header>
+
+  <nav class="navrow">
+    <div class="seg" role="tablist" aria-label="Screens">
+      <button role="tab" data-view="live" aria-selected="true">Live</button>
+      <button role="tab" data-view="journal">Journal</button>
+      <button role="tab" data-view="stats">Stats</button>
+      <button role="tab" data-view="settings">Settings</button>
+    </div>
+    <button class="icon-btn" id="btn-theme" type="button" aria-label="Switch to light theme" data-tip="Switch to light theme">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path id="theme-icon" fill="currentColor" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+  </nav>
+
+  <div id="banners" class="banners" aria-live="polite"></div>
+
+  <main>
+    <!-- ======================= Live ======================= -->
+    <section class="view" id="view-live" data-view="live">
+      <div class="kpis">
+        <div class="kpi">
+          <div class="kpi-label" id="kpi-equity-label" data-tip="Account equity: balance plus the floating profit or loss of open positions.">Equity</div>
+          <div class="kpi-value num" id="kpi-equity">—</div>
+          <div class="kpi-sub muted" id="kpi-equity-sub"></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label" data-tip="The bot's profit or loss (closed and open) since the forex day rolled over at 17:00 New York.">Today's P&amp;L</div>
+          <div class="kpi-value num" id="kpi-today">—</div>
+          <div class="kpi-sub num" id="kpi-today-pct"></div>
+        </div>
+        <div class="kpi kpi-wide">
+          <div class="kpi-label" data-tip="R is profit or loss in units of the money risked when the trade was opened: +1R made back the full risk.">Open position</div>
+          <div class="kpi-value" id="kpi-position">Flat</div>
+          <div class="kpi-sub num" id="kpi-position-sub"></div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label" data-tip="Largest fall from a peak in the bot's equity so far.">Max drawdown</div>
+          <div class="kpi-value num" id="kpi-dd">—</div>
+          <div class="kpi-sub num muted" id="kpi-dd-sub"></div>
+        </div>
+      </div>
+
+      <div class="live-body">
+        <div class="panel chart-panel">
+          <div class="chart-toolbar">
+            <div class="seg seg-sm" role="group" aria-label="Chart">
+              <button type="button" data-chart="price" aria-pressed="true">Price</button>
+              <button type="button" data-chart="equity" aria-pressed="false">Equity</button>
+            </div>
+            <label class="check"><input type="checkbox" id="toggle-emas"> <span>EMAs</span></label>
+            <span class="legend muted" id="ema-legend" hidden><span class="lg lg-e20"></span>20 <span class="lg lg-e50"></span>50 <span class="lg lg-e200"></span>200</span>
+          </div>
+          <div class="chart" id="live-chart"></div>
+          <div class="chart-empty muted" id="live-chart-empty" hidden>Waiting for MT5…</div>
+        </div>
+
+        <aside class="panel side">
+          <div class="card" id="latest-card">
+            <div class="card-head">
+              <span class="eyebrow">Latest call</span>
+              <span class="muted num" id="latest-time"></span>
+            </div>
+            <div class="reject" id="latest-reject" hidden></div>
+            <div class="thinking" id="latest-thinking" hidden><span class="spinner" aria-hidden="true"></span><span>Opus is thinking… <span class="num" id="thinking-secs">0s</span></span></div>
+            <div id="latest-body">
+              <div class="call-row">
+                <span class="action-word" id="latest-action">—</span>
+                <span class="conf" id="latest-conf" data-tip="Confidence Opus gave this call, from 1 (marginal) to 5 (exceptional)."></span>
+              </div>
+              <div class="chips"><span class="chip" id="latest-setup" hidden></span><span class="chip chip-quiet" id="latest-agree" hidden></span></div>
+              <p class="reasoning clamp" id="latest-reasoning"></p>
+              <button class="link" id="latest-more" type="button" hidden>Show more</button>
+              <p class="invalidation" id="latest-invalidation" hidden></p>
+            </div>
+            <p class="empty" id="latest-empty" hidden></p>
+          </div>
+          <div class="recent">
+            <div class="eyebrow">Recent</div>
+            <ol class="recent-list" id="recent-list"></ol>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="statusline muted" id="footer">
+        <span id="foot-conn"><span class="dot" aria-hidden="true"></span>MT5 connecting…</span>
+        <span class="sep">·</span><span id="foot-spread" class="num">Spread —</span>
+        <span class="sep">·</span><span id="foot-event">No high-impact events scheduled</span>
+        <span class="sep">·</span><span id="foot-cost" class="num" data-tip="Claude API cost since 17:00 New York, in US dollars.">API today $0.00</span>
+      </footer>
+    </section>
+
+    <!-- ======================= Journal ======================= -->
+    <section class="view" id="view-journal" data-view="journal" hidden>
+      <div class="toolbar">
+        <div class="seg" role="group" aria-label="Filter">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="trades" aria-pressed="false">Trades</button>
+          <button type="button" data-filter="rejected" aria-pressed="false">Rejected</button>
+          <button type="button" data-filter="holds" aria-pressed="false">Holds</button>
+        </div>
+        <input type="search" class="search" id="journal-search" placeholder="Search reasoning, setup…" aria-label="Search the journal">
+        <span class="grow"></span>
+        <a class="btn" id="journal-export" href="/api/journal.csv" download>Export CSV</a>
+      </div>
+      <div class="journal" id="journal-list"></div>
+      <div class="journal-more muted" id="journal-more" hidden>Loading…</div>
+    </section>
+
+    <!-- ======================= Stats ======================= -->
+    <section class="view" id="view-stats" data-view="stats" hidden>
+      <div class="toolbar">
+        <div class="seg" role="group" aria-label="Period">
+          <button type="button" data-period="today" aria-pressed="false">Today</button>
+          <button type="button" data-period="week" aria-pressed="false">Week</button>
+          <button type="button" data-period="month" aria-pressed="false">Month</button>
+          <button type="button" data-period="all" aria-pressed="true">All</button>
+        </div>
+        <span class="grow"></span>
+        <span class="muted" id="stats-mode"></span>
+      </div>
+      <div class="stats-top">
+        <div class="panel metrics-panel">
+          <table class="metrics" id="metrics">
+            <thead><tr><th></th><th class="r"><span class="lg lg-opus"></span>Opus</th><th class="r" data-tip="A shadow strategy that trades every Trend Signals flip on its own: entry at the flip close, stop on the trailing line, same risk per trade, spread included. Never sent to MT5."><span class="lg lg-bench"></span>Indicator only</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="panel equity-panel">
+          <div class="panel-head"><span class="eyebrow">Equity</span><span class="legend muted"><span class="lg lg-opus"></span>Opus <span class="lg lg-bench lg-dashed"></span>Indicator only</span></div>
+          <div class="chart" id="stats-chart"></div>
+          <div class="chart-empty muted" id="stats-empty" hidden></div>
+        </div>
+      </div>
+      <div class="bars-row">
+        <div class="panel"><div class="eyebrow">R by setup</div><div class="rbars" id="bars-setup"></div></div>
+        <div class="panel"><div class="eyebrow" data-tip="Confidence Opus gave the trade, from 1 (marginal) to 5 (exceptional).">R by confidence</div><div class="rbars" id="bars-conf"></div></div>
+        <div class="panel"><div class="eyebrow" data-tip="Session when the trade was opened (UTC): Asia 21–07, London 07–12, overlap 12–16, New York 16–21.">R by session</div><div class="rbars" id="bars-session"></div></div>
+      </div>
+    </section>
+
+    <!-- ======================= Settings ======================= -->
+    <section class="view" id="view-settings" data-view="settings" hidden>
+      <div class="settings">
+        <p class="note">Changes apply from the next bar. All changes are logged.</p>
+        <div class="setting-row mode-row">
+          <div class="setting-label">Dry run</div>
+          <div class="setting-control">
+            <button class="switch" id="dry-switch" role="switch" aria-checked="true" type="button"><span class="switch-knob"></span></button>
+            <span class="muted" id="dry-note">Simulated fills; no orders are sent.</span>
+          </div>
+        </div>
+        <div id="settings-groups"></div>
+        <div class="settings-group">
+          <h2 class="group-title">Recent changes</h2>
+          <ol class="changes" id="settings-changes"></ol>
+        </div>
+        <p class="settings-foot muted" id="settings-foot"></p>
+      </div>
+    </section>
+  </main>
+
+  <!-- ======================= Dialogs ======================= -->
+  <dialog id="dlg-stop" class="dialog">
+    <h2>Close the bot's positions and halt?</h2>
+    <p id="dlg-stop-text"></p>
+    <div class="dialog-actions"><button class="btn" value="cancel" type="button" data-close>Cancel</button><button class="btn btn-danger" id="dlg-stop-ok" type="button">Close &amp; halt</button></div>
+  </dialog>
+  <dialog id="dlg-exit" class="dialog">
+    <h2>Stop the bot and exit?</h2>
+    <p>Open positions keep their stop-loss and take-profit at the broker.</p>
+    <div class="dialog-actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn btn-primary" id="dlg-exit-ok" type="button">Stop and exit</button></div>
+  </dialog>
+  <dialog id="dlg-dry" class="dialog">
+    <h2>Turn off dry run?</h2>
+    <p>Approved trades will be sent as orders to this MT5 account:</p>
+    <dl class="kv" id="dlg-dry-account"></dl>
+    <p class="muted">Applies from the next bar.</p>
+    <div class="dialog-actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn btn-primary" id="dlg-dry-ok" type="button">Turn off dry run</button></div>
+  </dialog>
+  <dialog id="dlg-raw" class="dialog dialog-wide">
+    <h2>Exact prompt and response</h2>
+    <pre class="raw" id="dlg-raw-text"></pre>
+    <div class="dialog-actions"><button class="btn" type="button" id="dlg-raw-copy">Copy</button><button class="btn btn-primary" type="button" data-close>Close</button></div>
+  </dialog>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="/static/vendor/lightweight-charts-5.2.1.standalone.production.js"></script>
+  <script src="/static/app.js?v={{VERSION}}"></script>
+  <script src="/static/live.js?v={{VERSION}}"></script>
+  <script src="/static/journal.js?v={{VERSION}}"></script>
+  <script src="/static/stats.js?v={{VERSION}}"></script>
+  <script src="/static/settings.js?v={{VERSION}}"></script>
+</body>
+</html>

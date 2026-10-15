@@ -285,6 +285,7 @@ class FakeLLM:
         self.calls: list[dict] = []
         self.rng = random.Random(seed)
         self.snapshot_provider = None  # set by the engine in --sim: () -> snapshot data dict
+        self.force_next: str | None = None  # --sim preview controls: long | short | reject | hold
 
     async def decide(self, request: dict, cfg: Config) -> LLMResult:
         self.calls.append(request)
@@ -313,7 +314,31 @@ class FakeLLM:
                 return parse_response(fake_response(None, "end_turn"), cfg, latency)
             return parse_response(fake_response(item), cfg, latency)
         data = self.snapshot_provider() if self.snapshot_provider else {}
-        return parse_response(fake_response(self._rule_based(data)), cfg, latency)
+        forced, self.force_next = self.force_next, None
+        decision = self._forced(forced, data) if forced else self._rule_based(data)
+        return parse_response(fake_response(decision), cfg, latency)
+
+    def _forced(self, kind: str, d: dict) -> dict:
+        """A specific kind of call, for previewing UI states in --sim."""
+        if kind == "hold" or not d.get("market"):
+            return {"action": "HOLD", "order_type": None, "entry": None, "stop_loss": None, "take_profit": None, "confidence": 3,
+                    "setup": "No clear edge", "reasoning": "Price is drifting between the M15 EMAs with no momentum. Waiting for the London session to pick a direction.",
+                    "invalidation": "A close beyond the Asian range."}
+        side = "short" if kind == "short" else "long"
+        m, atr = d["market"], (d["indicators"]["M15"]["atr14"] or 0.001)
+        entry = m["ask"] if side == "long" else m["bid"]
+        dist = atr * (0.3 if kind == "reject" else 1.6)
+        sl = entry - dist if side == "long" else entry + dist
+        tp = entry + 2 * dist if side == "long" else entry - 2 * dist
+        return {"action": "OPEN_LONG" if side == "long" else "OPEN_SHORT", "order_type": "MARKET", "entry": None,
+                "stop_loss": round(sl, 5), "take_profit": round(tp, 5), "confidence": 4, "setup": "Asian range breakout",
+                "reasoning": ("Price broke the Asian-range high with H1 EMAs aligned up and RSI at 58, leaving room before overbought. "
+                              "The breakout bar closed near its high on rising tick volume, and the H4 trend is up. Buying the break with the "
+                              "stop below the retest low; the target is the previous day's high, which also lines up with the upper Bollinger band."
+                              if side == "long" else
+                              "Price lost the Asian-range low and the H1 EMAs have turned down; RSI 42 still has room to fall. Selling the break with "
+                              "the stop above the retest high and the previous day's low as the target."),
+                "invalidation": "An M15 close back inside the Asian range." }
 
     def _rule_based(self, d: dict) -> dict:
         hold = {"action": "HOLD", "order_type": None, "entry": None, "stop_loss": None, "take_profit": None, "invalidation": "A clean break with momentum would change the picture."}

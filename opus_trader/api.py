@@ -512,6 +512,27 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         asyncio.get_running_loop().call_later(0.2, on_exit)
         return {"ok": True}
 
+    if engine.sim:
+        # Preview-only controls (never registered against a real terminal).
+        @app.post("/api/sim/algo")
+        async def sim_algo(request: Request) -> dict:
+            engine.gw.mt5.terminal_trade_allowed = bool((await body(request)).get("on", True))
+            return {"ok": True}
+
+        @app.post("/api/sim/connection")
+        async def sim_connection(request: Request) -> dict:
+            engine.gw.mt5.ipc_ok = bool((await body(request)).get("on", True))
+            return {"ok": True}
+
+        @app.post("/api/sim/decide")
+        async def sim_decide(request: Request) -> dict:
+            from .clock import last_closed_bar_open
+
+            kind = (await body(request)).get("kind", "hold")
+            engine.llm.force_next = kind
+            asyncio.get_running_loop().create_task(engine.safe_process_bar(last_closed_bar_open(engine.clock.now()), wait=False, repeat=True))
+            return {"ok": True}
+
     return app
 
 

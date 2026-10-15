@@ -570,9 +570,9 @@ class Engine:
             bar_open = next_bar_close(target - timedelta(seconds=self.cfg.app.bar_delay_s)) - 2 * BAR
             await self.safe_process_bar(bar_open)
 
-    async def safe_process_bar(self, bar_open: datetime, wait: bool = True) -> int | None:
+    async def safe_process_bar(self, bar_open: datetime, wait: bool = True, repeat: bool = False) -> int | None:
         try:
-            return await self.process_bar(bar_open, wait)
+            return await self.process_bar(bar_open, wait, repeat=repeat)
         except Exception as exc:  # noqa: BLE001 - one bad bar never stops the loop
             log.exception("Bar %s failed", bar_open)
             self.event("bar_error", f"Bar {bar_open:%H:%M} UTC failed: {type(exc).__name__}: {exc}", "error")
@@ -595,10 +595,11 @@ class Engine:
                 return None
             await asyncio.sleep(2)
 
-    async def process_bar(self, bar_open: datetime, wait: bool = True, force: bool = False) -> int | None:
+    async def process_bar(self, bar_open: datetime, wait: bool = True, force: bool = False, repeat: bool = False) -> int | None:
         """Run one decision cycle for the M15 bar that opened at `bar_open`. Returns the decision id.
 
         `force` (used only by `check`) still reports a failed pre-check but calls the model anyway.
+        `repeat` (used only by the --sim preview controls) decides a bar that was already decided.
         """
         cfg = self.cfg
         mode = self.mode
@@ -615,11 +616,13 @@ class Engine:
         except NotConnected as exc:
             self.lost_connection(str(exc))
             return self.record_skip(bar_open, "MT5 disconnected", mode)
+        if bars is None and force and len(self.last_bars.get("M15", [])):
+            bars = self.last_bars  # `check` on a closed market: use the last closed bar there is
         if bars is None:
             log.info("No closed bar for %s: market closed", bar_open)
             return None
         bar_open = bars["M15"].time(-1)
-        if self.store.one("SELECT 1 FROM decisions WHERE bar_time=? AND mode=?", (snap_mod.fmt_t(bar_open), mode)):
+        if not (repeat and self.sim) and self.store.one("SELECT 1 FROM decisions WHERE bar_time=? AND mode=?", (snap_mod.fmt_t(bar_open), mode)):
             return None  # already decided (e.g. after a restart)
         if mode == "dry":
             await self.paper_backfill(parse_utc(self.store.get_state("paper_checked_until")) or now, now)

@@ -8,7 +8,6 @@ the top bar reads SIM instead of DEMO.
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,9 +42,10 @@ def write_sim_events(path: Path, now: datetime) -> None:
 class SimEnv:
     def __init__(self, root: Path, now: datetime | None = None, fresh: bool = True, seed: int = 7):
         self.dir = Path(root) / "data" / "sim"
-        if fresh and self.dir.exists():
-            shutil.rmtree(self.dir)
         self.dir.mkdir(parents=True, exist_ok=True)
+        if fresh:  # start a clean simulated journal; keep logs/
+            for name in ("opus_trader.sqlite", "opus_trader.sqlite-wal", "opus_trader.sqlite-shm", "config.yaml", "events.yaml", "STOP"):
+                (self.dir / name).unlink(missing_ok=True)
         now = (now or datetime.now(UTC)).astimezone(UTC)
         self.clock = SimClock(now)
         self.real_now = now
