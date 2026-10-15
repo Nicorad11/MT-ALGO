@@ -3,17 +3,75 @@
 # Opus Trader makes no model calls from `blackout_before_min` before to
 # `blackout_after_min` after each event (Settings > News). Only events whose
 # currency is listed in news.currencies (USD, EUR) and whose impact is "high"
-# count. Add the week's events from your usual calendar, for example:
+# count. The file is re-read every bar, so edits take effect without a restart.
 #
-#   - time: "2026-10-16T12:30:00Z"
-#     currency: USD
-#     impact: high
-#     title: Retail Sales
-#
-#   - time: "2026-10-29T13:15:00Z"
-#     currency: EUR
-#     impact: high
-#     title: ECB rate decision
-#
-# The file is re-read every bar, so edits take effect without a restart.
-events: []
+# Pre-filled on 2026-10-15 from the official calendars:
+#   Fed FOMC meetings   https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#                       (statement 2:00 pm ET, press conference 2:30 pm ET)
+#   ECB Governing Council https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html
+#                       (decision 14:15 CET, press conference 14:45 CET)
+#   BLS releases        https://www.bls.gov/schedule/news_release/current_year.asp
+#                       (Employment Situation and CPI at 8:30 am ET)
+# Times are converted to UTC with daylight saving (Europe changes 25 Oct, the US 1 Nov).
+# Add other events you care about (eurozone flash HICP, US GDP, PCE...) the same way,
+# and extend the list before mid-December.
+events:
+  - time: "2026-10-28T18:00:00Z"   # Wed 28 Oct 14:00 EDT
+    currency: USD
+    impact: high
+    title: FOMC statement
+
+  - time: "2026-10-28T18:30:00Z"   # Wed 28 Oct 14:30 EDT
+    currency: USD
+    impact: high
+    title: FOMC press conference
+
+  - time: "2026-10-29T13:15:00Z"   # Thu 29 Oct 14:15 CET
+    currency: EUR
+    impact: high
+    title: ECB rate decision
+
+  - time: "2026-10-29T13:45:00Z"   # Thu 29 Oct 14:45 CET
+    currency: EUR
+    impact: high
+    title: ECB press conference
+
+  - time: "2026-11-06T13:30:00Z"   # Fri 06 Nov 08:30 EST
+    currency: USD
+    impact: high
+    title: Non-Farm Payrolls (Oct)
+
+  - time: "2026-11-10T13:30:00Z"   # Tue 10 Nov 08:30 EST
+    currency: USD
+    impact: high
+    title: CPI (Oct)
+
+  - time: "2026-12-04T13:30:00Z"   # Fri 04 Dec 08:30 EST
+    currency: USD
+    impact: high
+    title: Non-Farm Payrolls (Nov)
+
+  - time: "2026-12-09T19:00:00Z"   # Wed 09 Dec 14:00 EST
+    currency: USD
+    impact: high
+    title: FOMC statement
+
+  - time: "2026-12-09T19:30:00Z"   # Wed 09 Dec 14:30 EST
+    currency: USD
+    impact: high
+    title: FOMC press conference
+
+  - time: "2026-12-10T13:30:00Z"   # Thu 10 Dec 08:30 EST
+    currency: USD
+    impact: high
+    title: CPI (Nov)
+
+  - time: "2026-12-17T13:15:00Z"   # Thu 17 Dec 14:15 CET
+    currency: EUR
+    impact: high
+    title: ECB rate decision
+
+  - time: "2026-12-17T13:45:00Z"   # Thu 17 Dec 14:45 CET
+    currency: EUR
+    impact: high
+    title: ECB press conference
