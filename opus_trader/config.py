@@ -328,3 +328,25 @@ def apply_changes(cfg: Config, changes: dict[str, Any], allow_locked: bool = Fal
     new_data = new_cfg.model_dump()
     diffs = [(k, old, new_data[k.split(".")[0]][k.split(".")[1]]) for k, old, _ in diffs]
     return new_cfg, diffs
+
+
+class ConfigManager:
+    """Holds the live config; every change is validated, saved to config.yaml and logged."""
+
+    def __init__(self, path: Path = CONFIG_PATH, store=None, persist: bool = True):
+        self.path = path
+        self.store = store
+        self.persist = persist
+        self.cfg = load_config(path) if persist else Config()
+
+    def update(self, changes: dict[str, Any], source: str = "ui", allow_locked: bool = False) -> list[tuple[str, Any, Any]]:
+        new_cfg, diffs = apply_changes(self.cfg, changes, allow_locked=allow_locked)
+        if not diffs:
+            return []
+        if self.persist:
+            save_config(new_cfg, self.path)
+        self.cfg = new_cfg
+        if self.store is not None:
+            for key, old, new in diffs:
+                self.store.log_setting(key, old, new, source)
+        return diffs

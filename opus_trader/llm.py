@@ -299,6 +299,8 @@ class FakeLLM:
                         "confidence": 3, "setup": "No clear edge", "reasoning": "Nothing to do.", "invalidation": "n/a"}
             else:
                 item = self.script.pop(0)
+            if callable(item):
+                item = item(self.snapshot_provider() if self.snapshot_provider else {})
             if isinstance(item, Exception):
                 raise item
             if item == "timeout":

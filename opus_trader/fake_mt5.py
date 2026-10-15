@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from .clock import NY, Clock, ny7_offset_s
+from .clock import Clock, fx_market_open, ny7_offset_s
 
 UTC = timezone.utc
 
@@ -109,17 +109,7 @@ SUBSTEPS = 4  # price samples per minute; ticks move every 15 s
 
 # ---------------------------------------------------------------- markets
 
-def market_open(t_utc: datetime) -> bool:
-    """FX hours: Sunday 17:00 New York to Friday 17:00 New York."""
-    ny = t_utc.astimezone(NY)
-    wd = ny.weekday()
-    if wd == 5:
-        return False
-    if wd == 4 and ny.hour >= 17:
-        return False
-    if wd == 6 and ny.hour < 17:
-        return False
-    return True
+market_open = fx_market_open
 
 
 class MinuteMarket:

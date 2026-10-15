@@ -70,7 +70,7 @@ def gate_state():
 
 @pytest.fixture
 def live(gw, store, clock, gate_state):
-    return LiveExecutor(gw, store, MAGIC, lambda: 10, ServerTime(), gate=lambda: gate_state["reason"])
+    return LiveExecutor(gw, store, MAGIC, lambda: 10, ServerTime(), gate=lambda purpose: gate_state["reason"] if purpose in ("open", "pending", "modify") else None)
 
 
 @pytest.fixture

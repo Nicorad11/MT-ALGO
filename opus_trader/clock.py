@@ -236,3 +236,16 @@ def parse_utc(s: str | None) -> datetime | None:
     if not s:
         return None
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def fx_market_open(t_utc: datetime) -> bool:
+    """FX trading hours: Sunday 17:00 New York to Friday 17:00 New York."""
+    ny = t_utc.astimezone(NY)
+    wd = ny.weekday()
+    if wd == 5:
+        return False
+    if wd == 4 and ny.hour >= 17:
+        return False
+    if wd == 6 and ny.hour < 17:
+        return False
+    return True

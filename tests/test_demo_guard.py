@@ -88,3 +88,10 @@ def test_blocked_attempt_is_logged(live, fake, store, gate_state):
         live.open(open_plan(), 5)
     row = store.one("SELECT * FROM orders WHERE decision_id=5")
     assert row["ok"] == 0 and row["retcode_name"] == "BLOCKED" and row["comment"] == "STOP file present"
+
+
+def test_gate_still_allows_closing_while_halted(live, fake, gate_state):
+    ticket = live.open(open_plan(), 1).ticket
+    gate_state["reason"] = "Halted by the kill switch"
+    assert live.close_position(ticket, "kill_switch").ok
+    assert ticket not in fake.positions

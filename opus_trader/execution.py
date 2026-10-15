@@ -117,13 +117,13 @@ class BaseExecutor:
 class LiveExecutor(BaseExecutor):
     mode = "live"
 
-    def __init__(self, gw, store, magic, deviation, server_time, gate: Callable[[], str | None]):
+    def __init__(self, gw, store, magic, deviation, server_time, gate: Callable[[str], str | None]):
         super().__init__(gw, store, magic, deviation, server_time)
-        self.gate = gate
+        self.gate = gate  # gate(purpose) -> reason to block, or None. Closing is allowed while halted.
 
     def _send(self, purpose: str, decision_id: int | None, request: dict, success: set[int]) -> tuple[bool, Any]:
         try:
-            res = self.gw.order_send(request, self.gate)
+            res = self.gw.order_send(request, lambda: self.gate(purpose))
         except SafetyError as exc:
             self._log_order(purpose, decision_id, request, None, False, comment=exc.message, retcode_name="BLOCKED")
             raise
