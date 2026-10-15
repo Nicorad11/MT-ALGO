@@ -80,7 +80,7 @@ model:
   # Reasoning effort per decision. Higher is more thorough and costs more.
   effort: high
   # Seconds to wait for a decision before treating the bar as HOLD.
-  timeout_s: 120
+  timeout_s: 180
   # Maximum output tokens per decision (thinking included).
   max_tokens: 16000
   # USD per million uncached input tokens.

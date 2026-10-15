@@ -161,7 +161,7 @@ class ModelConfig(_Section):
         json_schema_extra=ui("Effort", "", "How much reasoning Opus does per bar. Higher effort costs more."),
     )
     timeout_s: int = Field(
-        120, ge=30, le=300, description="Seconds to wait for a decision before treating the bar as HOLD.",
+        180, ge=30, le=600, description="Seconds to wait for a decision before treating the bar as HOLD.",
         json_schema_extra=ui("Timeout", "s"),
     )
     max_tokens: int = Field(
