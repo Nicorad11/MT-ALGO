@@ -25,7 +25,7 @@ Copy `.env.example` to `.env` and put your key in it:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-`.env` holds only the API key (and optionally `MT5_TERMINAL_PATH`). It is ignored by git.
+`.env` holds only the API key (and optionally `MT5_TERMINAL_PATH`). It is ignored by git. If the key is missing or still `sk-ant-...`, an amber banner says so and every bar is a HOLD until you fix it and restart.
 
 ## 3. Check everything, then start
 
@@ -96,7 +96,7 @@ The **Indicator only** benchmark trades every flip on its own: entry at the flip
 | Path | What |
 |---|---|
 | `config.yaml` | All settings, with a comment for each. The Settings screen edits it. |
-| `events.yaml` | High-impact events for the news blackout. Re-read every bar. |
+| `events.yaml` | High-impact events for the news blackout, re-read every bar. Pre-filled with the Fed, ECB, payrolls and CPI dates through 17 December 2026 from the official calendars; add later dates before then. |
 | `data/opus_trader.sqlite` | The record: decisions (full snapshot, exact prompt, raw response, tokens, cost, verdict), orders with retcodes, trades in EUR and R, equity per bar, the benchmark, engine events and every settings change. |
 | `data/logs/opus_trader.log` | Rotating text log. |
 | `STOP` | Create it to trigger the kill switch. |
