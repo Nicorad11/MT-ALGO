@@ -208,23 +208,19 @@
   }
 
   async function focusDecision(id) {
-    S.open.add(String(id));
-    let el = $(`#journal-list .jrow[data-id="${id}"]`);
-    if (!el) {
-      // Not in the loaded page: show it at the top.
+    id = String(id);
+    if (!S.items.find((x) => String(x.id) === id)) {
+      // Not in the loaded page: fetch it and show it at the top.
       try {
         const d = await api(`/api/journal/${id}`);
-        S.details.set(String(id), d);
-        if (!S.items.find((x) => String(x.id) === String(id))) S.items.unshift(d);
-        render();
-        el = $(`#journal-list .jrow[data-id="${id}"]`);
+        S.details.set(id, d);
+        S.items.unshift(d);
       } catch (e) { return; }
     }
-    if (el) {
-      if (!el.querySelector(".jdetail")) await toggle(el);
-      el = $(`#journal-list .jrow[data-id="${id}"]`);
-      el.scrollIntoView({ block: "start" });
-    }
+    S.open.add(id);
+    render();
+    const el = $(`#journal-list .jrow[data-id="${id}"]`);
+    if (el) el.scrollIntoView({ block: "nearest" });
   }
 
   Opus.views.journal = {
