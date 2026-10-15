@@ -198,7 +198,7 @@ def synthetic_market(start_utc: datetime, end_utc: datetime, seed: int = 7, star
     while i < n:
         length = int(rng.exponential(420)) + 60
         kind = rng.random()
-        mu = 0.0 if kind < 0.4 else rng.normal(0, 0.11) * 0.0001
+        mu = 0.0 if kind < 0.4 else rng.normal(0, 0.06) * 0.0001
         drift[i : i + length] = mu
         i += length
     # Gentle pull towards start_price keeps the path in a realistic band.
@@ -206,7 +206,7 @@ def synthetic_market(start_utc: datetime, end_utc: datetime, seed: int = 7, star
     price = start_price
     shocks = rng.standard_normal((n, SUBSTEPS)) / math.sqrt(SUBSTEPS)
     for j in range(n):
-        pull = (start_price - price) * 2e-5
+        pull = (start_price - price) * 8e-5
         sub[j, 0] = price
         step_sigma = sigma[j]
         for k in range(SUBSTEPS):
