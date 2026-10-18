@@ -78,6 +78,7 @@ def test_journal_filters_and_detail(client, env):
     assert d["saw"]["session"] and d["saw"]["signal"]["trend"] in ("up", "down")
     assert d["risk"]["calc"]["rr"] == pytest.approx(2.0, abs=0.01)
     assert [o["purpose"] for o in d["orders"]] == ["check", "open"]
+    assert d["thinking"] is None  # the scripted model returns an empty thinking block
     raw = client.get(f"/api/journal/{did}/raw").json()
     assert "HOLD is the default" in raw["system"] and raw["prompt"].startswith("## H4 candles")
 

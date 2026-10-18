@@ -266,6 +266,10 @@ main { min-height: 0; position: relative; }
 .jdetail { padding: 4px 16px 16px 76px; display: grid; gap: 16px; font-size: 13px; }
 .jdetail h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .jdetail p { margin: 0; line-height: 20px; max-width: 880px; }
+.think-summary { margin-top: 8px; }
+.think-summary summary { color: var(--accent); font-size: 13px; font-weight: 600; cursor: pointer; width: max-content; }
+.think-summary summary:hover { text-decoration: underline; }
+.think-summary p { margin-top: 4px; white-space: pre-wrap; color: var(--muted); }
 .facts { display: flex; flex-wrap: wrap; gap: 4px 16px; line-height: 20px; }
 .facts span b { font-weight: 400; color: var(--muted); margin-right: 4px; }
 .journal-more { padding: 16px 8px; font-size: 13px; }

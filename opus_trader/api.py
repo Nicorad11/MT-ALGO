@@ -30,6 +30,7 @@ from .clock import UTC, fmt_utc, month_start, parse_utc, trading_day_start, week
 from .config import SettingsError, field_specs
 from .engine import Engine
 from .execution import EXIT_LABELS
+from .llm import thinking_summary
 from .mt5_gateway import NotConnected
 from .snapshot import Bars
 
@@ -348,6 +349,7 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
             "risk": json.loads(d["risk_json"]) if d["risk_json"] else None,
             "signal": json.loads(d["signal_json"]) if d["signal_json"] else None,
             "orders": store.query("SELECT created_at, purpose, retcode, retcode_name, comment, order_ticket, deal_ticket, price, volume, ok FROM orders WHERE decision_id=? ORDER BY id", (decision_id,)),
+            "thinking": thinking_summary(json.loads(d["response_json"])) if d["response_json"] else None,
             "saw": None,
         })
         if snap:

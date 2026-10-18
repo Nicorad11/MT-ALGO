@@ -166,7 +166,7 @@
   function decisionDetail(d) {
     const parts = [];
     if (d.reasoning) {
-      parts.push(`<div><h3>Reasoning</h3><p>${fmt.esc(d.reasoning)}</p>${d.invalidation ? `<p class="muted" style="margin-top:4px"><b style="color:var(--text);font-weight:600">Invalidation:</b> ${fmt.esc(d.invalidation)}</p>` : ""}</div>`);
+      parts.push(`<div><h3>Reasoning</h3><p>${fmt.esc(d.reasoning)}</p>${d.invalidation ? `<p class="muted" style="margin-top:4px"><b style="color:var(--text);font-weight:600">Invalidation:</b> ${fmt.esc(d.invalidation)}</p>` : ""}${d.thinking ? `<details class="think-summary"><summary>How Opus thought it through (summary)</summary><p>${fmt.esc(d.thinking)}</p></details>` : ""}</div>`);
     }
     const w = d.saw;
     if (w) {

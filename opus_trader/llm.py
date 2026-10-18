@@ -96,6 +96,14 @@ Reading the snapshot
 - Prices are bid prices with 5 decimals. A pip is 0.0001. ATR values are given in pips."""
 
 
+def thinking_summary(response: dict | None) -> str | None:
+    """The summarized thinking blocks of a stored response, joined; None if there are none."""
+    blocks = (response or {}).get("content") or []
+    texts = [b.get("thinking", "").strip() for b in blocks if isinstance(b, dict) and b.get("type") == "thinking"]
+    text = "\n\n".join(t for t in texts if t)
+    return text or None
+
+
 def prompt_hash(system_text: str) -> str:
     return hashlib.sha256((system_text + json.dumps(TOOL, sort_keys=True)).encode()).hexdigest()[:16]
 
@@ -108,6 +116,8 @@ def build_request(cfg: Config, system_text: str, h4_text: str, h1_text: str, liv
         "system": [{"type": "text", "text": system_text, "cache_control": CACHE_1H}],
         "tools": [TOOL],
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        # Thinking is always on with Opus 5.5; "summarized" returns a readable summary for the journal (same cost).
+        "thinking": {"type": "adaptive", "display": "summarized"},
         "output_config": {"effort": cfg.model.effort},
         "messages": [{
             "role": "user",
@@ -289,9 +299,9 @@ class _Obj:
 
 
 def fake_response(tool_input: dict | None, stop_reason: str = "tool_use", model: str = "sim-scripted",
-                  usage: dict | None = None, category: str | None = None) -> _Obj:
+                  usage: dict | None = None, category: str | None = None, thinking: str = "") -> _Obj:
     u = usage or {"input_tokens": 3900, "output_tokens": 1450, "cache_read_input_tokens": 3600, "cache_creation_input_tokens": 0}
-    content = [_Obj(type="thinking", thinking="", signature="")]
+    content = [_Obj(type="thinking", thinking=thinking, signature="")]
     if tool_input is not None:
         content.append(_Obj(type="tool_use", id="toolu_sim", name="submit_decision", input=tool_input))
     return _Obj(id="msg_sim", type="message", role="assistant", model=model, content=content, stop_reason=stop_reason,
@@ -348,7 +358,9 @@ class FakeLLM:
         data = self.snapshot_provider() if self.snapshot_provider else {}
         forced, self.force_next = self.force_next, None
         decision = self._forced(forced, data) if forced else self._rule_based(data)
-        return parse_response(fake_response(decision), cfg, latency)
+        thinking = ("Simulated summary of the model's thinking. The real Opus summary appears here: how it read H4 and H1, "
+                    f"what M15 showed, and why it chose {decision['action'].replace('_', ' ').lower()}.")
+        return parse_response(fake_response(decision, thinking=thinking), cfg, latency)
 
     def _forced(self, kind: str, d: dict) -> dict:
         """A specific kind of call, for previewing UI states in --sim."""

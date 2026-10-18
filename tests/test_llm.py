@@ -51,7 +51,7 @@ def test_request_shape_sent_over_the_wire():
     assert body["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}  # forced tool_choice 400s on Opus 5.5
     assert body["tools"][0]["strict"] is True and body["tools"][0]["name"] == "submit_decision"
     assert body["output_config"] == {"effort": "high"}
-    assert "thinking" not in body  # adaptive by default; it can't be disabled on Opus 5.5
+    assert body["thinking"] == {"type": "adaptive", "display": "summarized"}  # always on with Opus 5.5; summary for the journal
     assert body["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     blocks = body["messages"][0]["content"]
     assert [b.get("cache_control") for b in blocks] == [{"type": "ephemeral", "ttl": "1h"}] * 2 + [None]
@@ -184,3 +184,15 @@ def test_unloadable_profile_is_reported_not_raised(monkeypatch, tmp_path):
     assert oc.key_problem and oc.key_problem.startswith("Anthropic credentials could not be loaded")
     r = asyncio.run(oc.decide(request(), Config()))
     assert r.status == "error" and r.error == oc.key_problem
+
+
+def test_thinking_summary_is_kept_for_the_journal():
+    from opus_trader.llm import thinking_summary
+
+    content = [{"type": "thinking", "thinking": "Read H4 as bullish.", "signature": "s"},
+               {"type": "thinking", "thinking": "", "signature": "s"},
+               {"type": "tool_use", "id": "toolu_1", "name": "submit_decision", "input": DECISION}]
+    res = asyncio.run(client_returning(api_message(content), []).decide(request(), Config()))
+    assert thinking_summary(res.raw) == "Read H4 as bullish."
+    assert thinking_summary({"content": [{"type": "thinking", "thinking": ""}]}) is None
+    assert thinking_summary(None) is None
