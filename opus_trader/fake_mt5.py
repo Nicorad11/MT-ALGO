@@ -95,8 +95,8 @@ RES_E_INTERNAL_FAIL_INIT = -10003
 RES_E_INTERNAL_FAIL_CONNECT = -10004
 
 # ---------------------------------------------------------------- record types (field names as in the real package)
-AccountInfo = namedtuple("AccountInfo", "login trade_mode leverage limit_orders margin_so_mode trade_allowed trade_expert margin_mode currency_digits fifo_close balance credit profit equity margin margin_free margin_level name server currency company")
-TerminalInfo = namedtuple("TerminalInfo", "community_account community_connection connected dlls_allowed trade_allowed tradeapi_disabled email_enabled ftp_enabled notifications_enabled mqid build maxbars codepage ping_last company name language path data_path commondata_path")
+AccountInfo = namedtuple("AccountInfo", "login trade_mode leverage limit_orders margin_so_mode trade_allowed trade_expert margin_mode currency_digits fifo_close balance credit profit equity margin margin_free margin_level margin_so_call margin_so_so margin_initial margin_maintenance assets liabilities commission_blocked name server currency company")
+TerminalInfo = namedtuple("TerminalInfo", "community_account community_connection connected dlls_allowed trade_allowed tradeapi_disabled email_enabled ftp_enabled notifications_enabled mqid build maxbars codepage ping_last community_balance retransmission company name language path data_path commondata_path")
 SymbolInfo = namedtuple("SymbolInfo", "name visible select digits spread point trade_tick_value trade_tick_value_profit trade_tick_value_loss trade_tick_size trade_contract_size volume_min volume_max volume_step trade_stops_level trade_freeze_level filling_mode expiration_mode trade_mode bid ask time currency_base currency_profit currency_margin")
 Tick = namedtuple("Tick", "time bid ask last volume time_msc flags volume_real")
 TradePosition = namedtuple("TradePosition", "ticket time time_msc time_update time_update_msc type magic identifier reason volume price_open sl tp price_current swap profit symbol comment external_id")
@@ -452,7 +452,7 @@ class FakeMT5:
         if not self._alive():
             return None
         return TerminalInfo(False, False, self.connected, False, self.terminal_trade_allowed, False, False, False, False, 0, 5000, 100000, 0, 25000,
-                            self.company, "MetaTrader 5", "English", "C:/Program Files/MT5", "C:/Users/demo/AppData", "C:/Users/demo/AppData/Common")
+                            0.0, 0.0, self.company, "MetaTrader 5", "English", "C:/Program Files/MT5", "C:/Users/demo/AppData", "C:/Users/demo/AppData/Common")
 
     def account_info(self):
         if not self._alive():
@@ -470,7 +470,8 @@ class FakeMT5:
         free = round(equity - margin, 2)
         level = round(equity / margin * 100, 2) if margin else 0.0
         return AccountInfo(self.login, self.trade_mode, self.leverage, 200, 0, True, True, self.margin_mode, 2, False,
-                           self.balance, 0.0, round(profit, 2), equity, round(margin, 2), free, level, "Demo User", self.server, self.currency, self.company)
+                           self.balance, 0.0, round(profit, 2), equity, round(margin, 2), free, level, 50.0, 30.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                           "Demo User", self.server, self.currency, self.company)
 
     def symbols_get(self, group: str | None = None):
         """Symbols matching an MT5 group filter ("*EURUSD*", comma lists, "!" exclusions)."""

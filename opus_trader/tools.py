@@ -101,6 +101,7 @@ def run_check(args) -> int:
     line("Margin mode", "Hedging", acct.margin_mode == mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
     line("Currency", acct.currency, acct.currency == "EUR")
     line("Balance / equity", f"{acct.balance:,.2f} / {acct.equity:,.2f} {acct.currency}")
+    line("Terminal", f"{ti.name} · {ti.path}")
     line("Terminal build", ti.build)
     line("Broker connection", "connected" if ti.connected else "NOT connected", bool(ti.connected))
     line("Algo Trading", "on" if ti.trade_allowed else "OFF (turn it on in the toolbar)", bool(ti.trade_allowed))

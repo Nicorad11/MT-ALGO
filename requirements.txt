@@ -1,4 +1,4 @@
-# Runtime dependencies (Windows, Python 3.11-3.13, 64-bit)
+# Runtime dependencies (Windows, Python 3.11-3.14, 64-bit)
 MetaTrader5>=5.0.5200; sys_platform == "win32"
 pywebview>=6.0; sys_platform == "win32"
 anthropic>=1.14,<2
