@@ -41,12 +41,62 @@ def setup_logging(log_dir: Path, verbose: bool = False) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
+ENV_PATH = ROOT / ".env"
+
+
 def load_env() -> None:
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
-    load_dotenv(ROOT / ".env")
+    path = ENV_PATH
+    if not path.exists() and path.with_name(".env.txt").exists():
+        path = path.with_name(".env.txt")  # Windows Explorer hides extensions, so ".env" often ends up as ".env.txt"
+    load_dotenv(path)
+
+
+def save_env_value(path: Path, name: str, value: str) -> None:
+    """Set NAME=value in a .env file, keeping its other lines (and creating it if needed)."""
+    lines = path.read_text(encoding="utf-8-sig").splitlines() if path.exists() else [
+        "# Opus Trader settings that stay on this PC. Never put your MT5 password here."]
+    out, done = [], False
+    for ln in lines:
+        if ln.strip().split("=", 1)[0].strip() == name and not ln.lstrip().startswith("#"):
+            if not done:
+                out.append(f"{name}={value}")
+                done = True
+            continue
+        out.append(ln)
+    if not done:
+        out.append(f"{name}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def ensure_api_key(interactive: bool | None = None, ask=input) -> None:
+    """First run: ask for the Anthropic API key in the console and save it to .env."""
+    from .llm import key_problem
+
+    problem = key_problem(os.environ.get("ANTHROPIC_API_KEY"))
+    if interactive is None:
+        interactive = bool(sys.stdin and sys.stdin.isatty())
+    if not problem or not interactive:
+        return
+    print(f"\n{problem}. Opus needs an Anthropic API key to make decisions.")
+    print("Create one at https://console.anthropic.com/settings/keys (it starts with sk-ant-).")
+    try:
+        key = ask("Paste it here and press Enter (or just press Enter to skip): ").strip().strip('"')
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if not key:
+        print("Skipped. Opus Trader will run, but every bar is a HOLD until the key is in .env.\n")
+        return
+    if not key.startswith("sk-ant-") or key.endswith("..."):
+        print("That isn't an Anthropic API key (those start with sk-ant-), so nothing was saved.\n")
+        return
+    save_env_value(ENV_PATH, "ANTHROPIC_API_KEY", key)
+    os.environ["ANTHROPIC_API_KEY"] = key
+    print(f"Saved to {ENV_PATH}.\n")
 
 
 class InstanceLock:
@@ -204,6 +254,8 @@ def run_app(args) -> int:
     lock = InstanceLock((DATA / "sim" if args.sim else DATA) / "opus_trader.lock")
     if not lock.acquire():
         return already_running(lock)
+    if not args.sim:
+        ensure_api_key()
     setup_logging((DATA / "sim" / "logs") if args.sim else (DATA / "logs"), args.verbose)
     engine, sim_env = build_engine(args)
     port = free_port(args.port or engine.cfg.app.server_port)
@@ -237,6 +289,16 @@ def run_app(args) -> int:
         log.warning("pywebview isn't available; opening the UI in your browser instead")
         webbrowser.open(url)
         return wait_for_ctrl_c(thread)
+    renderer = windows_renderer()
+    if renderer in ("mshtml", "unavailable"):
+        # Without WebView2, pywebview silently falls back to Internet Explorer, which can't run this UI.
+        if renderer == "mshtml":
+            log.warning("The app window needs the Microsoft Edge WebView2 Runtime, which isn't installed; opening the UI in your browser "
+                        "instead. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ to get the app window.")
+        else:
+            log.warning("The app window couldn't open; opening the UI in your browser instead.")
+        webbrowser.open(url)
+        return wait_for_ctrl_c(thread)
 
     window = webview.create_window("Opus Trader", url, width=1360, height=860, min_size=(1024, 700), background_color="#0E0F11", text_select=True)
     window_holder["window"] = window
@@ -260,6 +322,18 @@ def run_app(args) -> int:
     return 0
 
 
+def windows_renderer() -> str | None:
+    """The engine pywebview will use on Windows: "edgechromium", "mshtml" (no WebView2), or "unavailable"."""
+    if os.name != "nt":
+        return None
+    try:
+        from webview.platforms import winforms  # picks the renderer when imported, as webview.start() does
+    except Exception as exc:  # noqa: BLE001 - .NET or pythonnet problems
+        log.warning("The Windows app-window backend couldn't load: %s", exc)
+        return "unavailable"
+    return getattr(winforms, "renderer", None)
+
+
 def wait_for_ctrl_c(thread: ServerThread) -> int:
     print("\nOpus Trader is running. Press Ctrl+C here to stop the bot and exit "
           "(open positions keep their stop-loss and take-profit at the broker).\n", flush=True)
@@ -278,6 +352,8 @@ def run_once(args) -> int:
     lock = InstanceLock((DATA / "sim" if args.sim else DATA) / "opus_trader.lock")
     if not lock.acquire():
         return already_running(lock)
+    if not args.sim:
+        ensure_api_key()
     setup_logging((DATA / "sim" / "logs") if args.sim else (DATA / "logs"), args.verbose)
     engine, sim_env = build_engine(args)
 

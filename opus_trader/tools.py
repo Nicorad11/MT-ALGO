@@ -47,6 +47,8 @@ def print_decision(store: Store, decision_id: int | None) -> int:
     line("Cost / latency", f"${d['cost_usd']:.4f} · {d['latency_ms'] / 1000:.1f} s")
     for o in store.query("SELECT purpose, retcode, retcode_name, comment, ok FROM orders WHERE decision_id=? ORDER BY id", (decision_id,)):
         line(f"Order ({o['purpose']})", f"retcode {o['retcode']} {o['retcode_name']} · {o['comment']}", bool(o["ok"]))
+        if o["retcode_name"] == "MARKET_CLOSED":
+            print(f"     {'':<28}Expected while the market is closed. Run check again on a weekday to test the order check too.")
     if d["reasoning"]:
         print("\nReasoning\n  " + d["reasoning"].replace("\n", "\n  "))
         print(f"  Invalidation: {d['invalidation']}")
@@ -130,8 +132,10 @@ def run_check(args) -> int:
         line("Server time", "not detected (market closed?). Assuming New York + 7 h until the first live tick.", None)
     gw.shutdown()
 
+    from .app import ensure_api_key
     from .llm import key_problem
 
+    ensure_api_key()
     problem = key_problem(os.environ.get("ANTHROPIC_API_KEY"))
     if problem:
         print(f"\n  !! {problem}. Copy .env.example to .env and put your key in it, then run check again.")

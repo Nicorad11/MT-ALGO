@@ -17,9 +17,9 @@ Claude Opus 5.5 trades EUR/USD on a **MetaTrader 5 demo account**, one decision 
 
 If you have more than one MT5 installed, set `MT5_TERMINAL_PATH` in `.env` to the `terminal64.exe` you want.
 
-## 2. Add your Anthropic API key
+## 2. Your Anthropic API key
 
-Copy `.env.example` to `.env` and put your key in it:
+The first time you run `check.bat` or `start.bat`, Opus Trader asks for your API key in its console window (create one at console.anthropic.com → Settings → API keys; it starts with `sk-ant-`). Paste it and press Enter: it is saved to `.env` in the Opus Trader folder. To change it later, edit that file:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...

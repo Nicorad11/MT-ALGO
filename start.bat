@@ -8,14 +8,7 @@ set "PYTHONUTF8=1"
 call :setup
 if errorlevel 1 exit /b 1
 if /i "%~1"=="--setup-only" exit /b 0
-if not exist ".env" (
-  echo.
-  echo  No .env file found.
-  echo  Copy .env.example to .env and put your ANTHROPIC_API_KEY in it, then start again.
-  echo.
-  pause
-  exit /b 1
-)
+rem On the first run, Opus Trader asks for your Anthropic API key here and saves it to .env.
 ".venv\Scripts\python.exe" -m opus_trader %*
 if errorlevel 1 pause
 exit /b
