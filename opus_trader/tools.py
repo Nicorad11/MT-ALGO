@@ -139,7 +139,7 @@ def run_check(args) -> int:
     ensure_api_key()
     problem = key_problem(os.environ.get("ANTHROPIC_API_KEY"))
     if problem:
-        print(f"\n  !! {problem}. Copy .env.example to .env and put your key in it, then run check again.")
+        print(f"\n  !! {problem}. Run check again and paste your key when asked (or put it in .env).")
         return 1
 
     print("\nOne dry-run cycle on the last closed M15 bar (real snapshot, real Opus call, risk engine, order_check)...")
