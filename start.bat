@@ -34,8 +34,9 @@ rem Install dependencies on the first run and whenever requirements.txt changes.
 ".venv\Scripts\python.exe" -c "import sys; sys.exit(open('requirements.txt','rb').read() != open('.venv/requirements.installed','rb').read())" >nul 2>nul
 if not errorlevel 1 exit /b 0
 echo Installing dependencies (about a minute)...
-".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-".venv\Scripts\python.exe" -m pip install --quiet -r requirements.txt
+rem --no-compile: no .pyc files at install time, whose long paths can exceed Windows' 260-character limit.
+".venv\Scripts\python.exe" -m pip install --quiet --no-compile --upgrade pip
+".venv\Scripts\python.exe" -m pip install --quiet --no-compile -r requirements.txt
 if errorlevel 1 goto :pipfail
 copy /y requirements.txt .venv\requirements.installed >nul
 exit /b 0
@@ -72,5 +73,7 @@ exit /b 1
 :pipfail
 echo.
 echo  Installing dependencies failed. Check your internet connection and try again.
+echo  If the error mentions a long path or "No such file or directory", move the Opus Trader
+echo  folder somewhere short, such as C:\OpusTrader, delete its .venv folder, and start again.
 pause
 exit /b 1

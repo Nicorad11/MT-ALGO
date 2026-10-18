@@ -8,6 +8,10 @@ Claude Opus 5.5 trades EUR/USD on a **MetaTrader 5 demo account**, one decision 
 
 ---
 
+## 0. Get Opus Trader
+
+On the GitHub page, choose **Code → Download ZIP**, then right-click the ZIP → **Extract All…** and extract it to a short folder such as `C:\OpusTrader`. Very long folder paths (a nested folder in Downloads, for example) can make the first install fail on Windows. If Windows asks whether to run one of the `.bat` files, choose **Run** (or **More info → Run anyway**).
+
 ## 1. Set up MetaTrader 5
 
 1. Install the OANDA TMS MetaTrader 5 terminal and log in to your **demo** account (server `OANDATMS-MT5`, hedging, EUR).
