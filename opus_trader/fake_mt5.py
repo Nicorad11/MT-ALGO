@@ -90,6 +90,8 @@ TRADE_RETCODE_INVALID_FILL = 10030
 TRADE_RETCODE_CONNECTION = 10031
 TRADE_RETCODE_POSITION_CLOSED = 10036
 RES_S_OK = 1
+RES_E_INVALID_PARAMS = -2
+RES_E_INTERNAL_FAIL_INIT = -10003
 RES_E_INTERNAL_FAIL_CONNECT = -10004
 
 # ---------------------------------------------------------------- record types (field names as in the real package)
@@ -431,7 +433,7 @@ class FakeMT5:
     # ------------------------------------------------------------ module API
     def initialize(self, path: str | None = None, **kwargs) -> bool:
         if not self.init_ok or not self.ipc_ok:
-            self._last_error = (RES_E_INTERNAL_FAIL_CONNECT, "IPC initialize failed, MetaTrader 5 x64 not found")
+            self._last_error = (RES_E_INTERNAL_FAIL_INIT, "IPC initialize failed, MetaTrader 5 x64 not found")
             return False
         self.initialized = True
         self._last_error = (RES_S_OK, "Success")

@@ -85,7 +85,11 @@ def run_check(args) -> int:
         line("Symbol" if exc.code == "symbol" else "Account", exc.message, False)
         return 1
     except NotConnected as exc:
-        line("MT5", f"{exc}. Is the terminal open and logged in?", False)
+        line("MT5", f"{exc.hint}." if exc.hint else f"{exc}. Is the terminal open and logged in?", False)
+        if exc.hint:
+            print(f"     {'':<28}({exc})")
+        if os.environ.get("MT5_TERMINAL_PATH"):
+            print(f"     {'':<28}MT5_TERMINAL_PATH in .env is {os.environ['MT5_TERMINAL_PATH']}")
         return 1
     ti = mt5.terminal_info()
     acct = mt5.account_info()

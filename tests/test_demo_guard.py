@@ -1,7 +1,7 @@
 import pytest
 
 from opus_trader.fake_mt5 import FakeMT5
-from opus_trader.mt5_gateway import MT5Gateway, NotConnected, SafetyError
+from opus_trader.mt5_gateway import NOT_LOGGED_IN, MT5Gateway, NotConnected, SafetyError
 from opus_trader.risk import Plan
 
 from .conftest import MAGIC
@@ -36,8 +36,30 @@ def test_netting_account_refused(fake):
 
 def test_terminal_not_running(fake):
     fake.init_ok = False
-    with pytest.raises(NotConnected):
+    with pytest.raises(NotConnected) as err:
         MT5Gateway(fake, "EURUSD", MAGIC).connect()
+    assert "-10003" in str(err.value)  # what the real package reports when no terminal is found
+    assert err.value.hint.startswith("MetaTrader 5 isn't running or wasn't found")
+
+
+def test_terminal_open_but_not_logged_in(fake):
+    fake.login = 0  # an empty account record, before anyone logs in
+    with pytest.raises(NotConnected) as err:
+        MT5Gateway(fake, "EURUSD", MAGIC).connect()
+    assert err.value.hint == NOT_LOGGED_IN
+
+
+def test_refused_request_is_logged_not_a_disconnect(live, fake, store):
+    def refuse(request):
+        fake._last_error = (fake.RES_E_INVALID_PARAMS, 'Invalid "comment" argument')
+        return None
+
+    fake.order_send = refuse
+    with pytest.raises(SafetyError) as err:
+        live.open(open_plan(), 7)
+    assert err.value.code == "request" and not err.value.fatal
+    row = store.one("SELECT * FROM orders WHERE decision_id=7")
+    assert row["ok"] == 0 and row["retcode_name"] == "REFUSED" and 'Invalid "comment" argument' in row["comment"]
 
 
 def test_rechecked_before_every_order(live, fake):

@@ -80,6 +80,7 @@ class Runtime:
     reconnect_attempt: int = 0
     reconnect_at: datetime | None = None
     last_error: str | None = None
+    connect_hint: str | None = None  # plain-English advice while disconnected
     thinking_since: datetime | None = None
     next_bar_at: datetime | None = None
     bid: float | None = None
@@ -212,7 +213,7 @@ class Engine:
                 self.block(exc.message)
             return False
         except NotConnected as exc:
-            self._schedule_reconnect(str(exc))
+            self._schedule_reconnect(str(exc), exc.hint)
             return False
         except Exception as exc:  # noqa: BLE001 - the terminal can fail in odd ways
             self._schedule_reconnect(f"{type(exc).__name__}: {exc}")
@@ -222,6 +223,7 @@ class Engine:
         self.rt.reconnect_attempt = 0
         self.rt.reconnect_at = None
         self.rt.last_error = None
+        self.rt.connect_hint = None
         self.rt.account = acct.to_dict()
         info = await self.mt(self.gw.symbol_info)
         specified = await self.mt(self.gw.supports_specified_expiration)
@@ -233,19 +235,20 @@ class Engine:
         self.push_banner()
         return True
 
-    def _schedule_reconnect(self, reason: str) -> None:
+    def _schedule_reconnect(self, reason: str, hint: str | None = None) -> None:
         delay = BACKOFF[min(self.rt.reconnect_attempt, len(BACKOFF) - 1)]
         self.rt.reconnect_attempt += 1
         self.rt.reconnect_at = self.clock.now() + timedelta(seconds=delay)
         if self.rt.last_error != reason:
             self.event("disconnected", f"MT5 not reachable: {reason}", "warning")
         self.rt.last_error = reason
+        self.rt.connect_hint = hint
         self.push_banner()
 
-    def lost_connection(self, reason: str) -> None:
+    def lost_connection(self, reason: str, hint: str | None = None) -> None:
         if self.rt.connected:
             self.rt.connected = False
-            self._schedule_reconnect(reason)
+            self._schedule_reconnect(reason, hint)
 
     def block(self, message: str) -> None:
         """Fatal safety stop: no more trading until the app is restarted."""
@@ -349,7 +352,7 @@ class Engine:
             if self.mode == "live" or self.store.one("SELECT 1 FROM trades WHERE mode='live' AND status='open'"):
                 await self.reconcile_live()
         except NotConnected as exc:
-            self.lost_connection(str(exc))
+            self.lost_connection(str(exc), exc.hint)
         except Exception:  # noqa: BLE001
             log.exception("Reconcile failed")
 
@@ -473,7 +476,7 @@ class Engine:
                             r = await self.mt(self.live.cancel_pending, o.ticket, reason)
                             cancelled, failed = cancelled + r.ok, failed + (not r.ok)
                 except NotConnected as exc:
-                    self.lost_connection(str(exc))
+                    self.lost_connection(str(exc), exc.hint)
                     failed += 1
                 except SafetyError as exc:
                     self.event("flatten_blocked", exc.message, "error")
@@ -629,7 +632,7 @@ class Engine:
                     return self.record_skip(bar_open, "Waiting for a live tick to confirm the broker's server time", mode) if fx_market_open(now) else None
             bars = await self.wait_for_bar(bar_open, wait)
         except NotConnected as exc:
-            self.lost_connection(str(exc))
+            self.lost_connection(str(exc), exc.hint)
             return self.record_skip(bar_open, "MT5 disconnected", mode)
         if bars is None and force and len(self.last_bars.get("M15", [])):
             bars = self.last_bars  # `check` on a closed market: use the last closed bar there is
@@ -759,7 +762,7 @@ class Engine:
                     self.block(exc.message)
                 return False, exc.message
             except NotConnected as exc:
-                self.lost_connection(str(exc))
+                self.lost_connection(str(exc), exc.hint)
                 return False, "MT5 disconnected"
         if res.ok:
             self.bus.publish("trade", {"changes": [plan.kind.lower()]})
@@ -933,7 +936,7 @@ class Engine:
         try:
             health = await self.mt(self.gw.health)
             if not health.ipc_ok:
-                self.lost_connection("terminal closed or not responding")
+                self.lost_connection("terminal closed or not responding", "MetaTrader 5 closed or isn't responding. Open the terminal and log in to your demo account")
                 self.push_status(force=True)
                 return
             if health.login != self.gw.account_id.login or health.is_demo is False:
@@ -966,7 +969,7 @@ class Engine:
             if exc.fatal:
                 self.block(exc.message)
         except NotConnected as exc:
-            self.lost_connection(str(exc))
+            self.lost_connection(str(exc), exc.hint)
         self.push_status()
 
     # ------------------------------------------------------------ UI payloads
@@ -988,7 +991,8 @@ class Engine:
             if self.rt.reconnect_at:
                 secs = max(0, int((self.rt.reconnect_at - self.clock.now()).total_seconds()))
                 when = f" Reconnecting in {secs} s (attempt {self.rt.reconnect_attempt})."
-            out.append({"level": "warning", "text": f"MT5 disconnected.{when} Trading is paused.", "reconnect_at": fmt_utc(self.rt.reconnect_at)})
+            lead = f"MT5 disconnected: {self.rt.connect_hint}." if self.rt.connect_hint else "MT5 disconnected."
+            out.append({"level": "warning", "text": f"{lead}{when} Trading is paused.", "reconnect_at": fmt_utc(self.rt.reconnect_at)})
         elif not self.rt.broker_connected:
             out.append({"level": "warning", "text": "MT5 has no connection to the broker. Trading is paused."})
         elif not self.rt.algo_on:

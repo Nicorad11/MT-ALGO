@@ -153,11 +153,34 @@ def test_fake_llm_script():
     assert [r.status for r in out] == ["ok", "timeout", "refusal", "no_decision"]
 
 
-def test_missing_or_placeholder_key_is_reported_without_a_call(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+def no_credentials(monkeypatch, tmp_path):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID", "APPDATA"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ANTHROPIC_CONFIG_DIR", str(tmp_path / "anthropic"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
+def test_missing_or_placeholder_key_is_reported_without_a_call(monkeypatch, tmp_path):
+    no_credentials(monkeypatch, tmp_path)
     assert key_problem(None) == "ANTHROPIC_API_KEY is not set"
     assert key_problem("sk-ant-...") == "ANTHROPIC_API_KEY is still the placeholder from .env.example"
     assert key_problem("sk-ant-api03-abc") is None
     r = asyncio.run(OpusClient(None).decide(request(), Config()))
     assert r.status == "error" and r.error == "ANTHROPIC_API_KEY is not set"
+
+
+def test_an_ant_login_profile_counts_as_credentials(monkeypatch, tmp_path):
+    no_credentials(monkeypatch, tmp_path)
+    creds = tmp_path / "anthropic" / "credentials"
+    creds.mkdir(parents=True)
+    (creds / "default.json").write_text("{}")
+    assert key_problem(None) is None
+
+
+def test_unloadable_profile_is_reported_not_raised(monkeypatch, tmp_path):
+    no_credentials(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_PROFILE", "missing")  # the SDK can't load it and raises while constructing
+    oc = OpusClient(None)
+    assert oc.key_problem and oc.key_problem.startswith("Anthropic credentials could not be loaded")
+    r = asyncio.run(oc.decide(request(), Config()))
+    assert r.status == "error" and r.error == oc.key_problem

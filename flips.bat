@@ -4,7 +4,8 @@ setlocal
 cd /d "%~dp0"
 title Opus Trader flips
 set "PYTHONUTF8=1"
-call start.bat --setup-only || exit /b 1
+call start.bat --setup-only
+if errorlevel 1 exit /b 1
 ".venv\Scripts\python.exe" -m opus_trader flips %*
 echo.
 pause

@@ -125,7 +125,7 @@ class LiveExecutor(BaseExecutor):
         try:
             res = self.gw.order_send(request, lambda: self.gate(purpose))
         except SafetyError as exc:
-            self._log_order(purpose, decision_id, request, None, False, comment=exc.message, retcode_name="BLOCKED")
+            self._log_order(purpose, decision_id, request, None, False, comment=exc.message, retcode_name="REFUSED" if exc.code == "request" else "BLOCKED")
             raise
         ok = res.retcode in success
         self._log_order(purpose, decision_id, request, res, ok)

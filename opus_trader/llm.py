@@ -205,11 +205,20 @@ def parse_response(resp: Any, cfg: Config, latency_ms: int) -> LLMResult:
     return LLMResult("ok", decision, **base)
 
 
+def _has_other_credentials() -> bool:
+    """Credentials the SDK resolves without an API key: a token, a named profile, federation, or an `ant auth login` profile."""
+    if any(os.environ.get(v) for v in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID")):
+        return True
+    dirs = [os.environ.get("ANTHROPIC_CONFIG_DIR"), os.path.join(os.environ.get("APPDATA") or "", "Anthropic") if os.environ.get("APPDATA") else None,
+            os.path.join(os.path.expanduser("~"), ".config", "anthropic")]
+    return any(d and os.path.isdir(os.path.join(d, "credentials")) and os.listdir(os.path.join(d, "credentials")) for d in dirs)
+
+
 def key_problem(api_key: str | None) -> str | None:
     """Why the configured API key can't work, or None if it looks usable."""
     key = (api_key or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if not key:
-        return None if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "ANTHROPIC_API_KEY is not set"
+        return None if _has_other_credentials() else "ANTHROPIC_API_KEY is not set"
     if key.endswith("...") or key == "sk-ant-":
         return "ANTHROPIC_API_KEY is still the placeholder from .env.example"
     return None
@@ -223,7 +232,13 @@ class OpusClient:
 
         self._anthropic = anthropic
         self.key_problem = key_problem(api_key)
-        self.client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else anthropic.AsyncAnthropic()
+        self.client = None
+        if self.key_problem:
+            return  # decide() reports it; no call is attempted
+        try:
+            self.client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else anthropic.AsyncAnthropic()
+        except Exception as exc:  # noqa: BLE001 - e.g. ANTHROPIC_PROFILE names a profile that doesn't exist
+            self.key_problem = f"Anthropic credentials could not be loaded ({exc})"
 
     async def decide(self, request: dict, cfg: Config) -> LLMResult:
         a = self._anthropic
@@ -248,6 +263,9 @@ class OpusClient:
         except a.APIConnectionError as exc:
             return LLMResult("error", latency_ms=int((time.monotonic() - t0) * 1000), error=f"network error: {exc}")
         except Exception as exc:  # noqa: BLE001 - one bad call never stops the loop
+            if isinstance(exc, TypeError) and "authentication" in str(exc):
+                # The SDK found no credentials at all (no key, token or `ant auth login` profile).
+                return LLMResult("error", latency_ms=int((time.monotonic() - t0) * 1000), error="no Anthropic credentials found: set ANTHROPIC_API_KEY in .env")
             log.exception("Unexpected error calling the model")
             return LLMResult("error", latency_ms=int((time.monotonic() - t0) * 1000), error=f"{type(exc).__name__}: {exc}")
         return parse_response(resp, cfg, int((time.monotonic() - t0) * 1000))

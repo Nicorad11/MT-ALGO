@@ -144,6 +144,20 @@ def test_disconnect_and_reconnect_with_backoff(env):
     assert env.engine.status()["status"] == "running"
 
 
+def test_disconnect_banner_says_what_to_do(env):
+    env.fake.ipc_ok = False
+    env.run(env.engine.watch_once())
+    assert any(b["text"].startswith("MT5 disconnected: MetaTrader 5 closed or isn't responding.") for b in env.engine.banners())
+    env.advance(3 / 60)
+    env.run(env.engine.watch_once())  # the retry can't find a terminal at all
+    assert any(b["text"].startswith("MT5 disconnected: MetaTrader 5 isn't running or wasn't found.") for b in env.engine.banners())
+    env.fake.ipc_ok = True
+    env.advance(10 / 60)
+    env.run(env.engine.watch_once())
+    assert env.engine.status()["status"] == "running"
+    assert not any("disconnected" in b["text"] for b in env.engine.banners())
+
+
 def test_kill_switch_file_closes_bot_trades_only(tmp_path):
     env = Env(tmp_path, script=[entry("long")], dry_run=False)
     try:

@@ -161,9 +161,13 @@
     setPill(s.status, text);
 
     $("#symbol-label").textContent = `${s.symbol || "EURUSD"} · M15`;
+    // DEMO only once the attached account has passed the demo check; nothing is shown before that.
     const acct = $("#badge-account");
+    const verified = Boolean(s.account && s.account.login);
+    acct.hidden = !s.sim && !verified;
     acct.textContent = s.sim ? "SIM" : "DEMO";
-    acct.dataset.tip = s.sim ? "Preview mode: a simulated terminal and a rule-based stand-in for Opus. Nothing is real." : "Opus Trader only runs on MT5 demo accounts.";
+    acct.dataset.tip = s.sim ? "Preview mode: a simulated terminal and a rule-based stand-in for Opus. Nothing is real."
+      : verified ? `Demo account ${s.account.login} on ${s.account.server}. Opus Trader only runs on MT5 demo accounts.` : "";
     $("#badge-dry").hidden = !s.dry_run;
 
     const pause = $("#btn-pause");

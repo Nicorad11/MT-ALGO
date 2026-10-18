@@ -26,8 +26,30 @@ SYMBOL_EXPIRATION_SPECIFIED = 4
 SYMBOL_EXPIRATION_SPECIFIED_DAY = 8
 
 
+# last_error() codes from the MetaTrader5 package that mean the terminal itself can't be reached
+# (RES_E_INTERNAL_FAIL*, the same values as the package's constants).
+IPC_ERRORS = {-10000, -10001, -10002, -10003, -10004, -10005}
+NOT_LOGGED_IN = "MetaTrader 5 is open but not logged in. Log in to your demo account in the terminal"
+
+
 class NotConnected(Exception):
     """The terminal isn't reachable (closed, IPC failure, not logged in)."""
+
+    def __init__(self, message: str, hint: str | None = None):
+        super().__init__(message)
+        self.hint = hint  # what to do about it, in plain words (the banner and check.bat show it)
+
+
+def connection_hint(err: Any) -> str | None:
+    """Plain-English advice for a MetaTrader5 last_error() tuple, if there is one."""
+    code = err[0] if isinstance(err, tuple) and err else None
+    if code == -10003:
+        return "MetaTrader 5 isn't running or wasn't found. Open the MT5 terminal and log in to your demo account"
+    if code == -10005:
+        return "MetaTrader 5 didn't answer in time; it may still be starting"
+    if code in IPC_ERRORS:
+        return "MetaTrader 5 isn't responding. Check that the terminal is open"
+    return None
 
 
 class SafetyError(Exception):
@@ -89,10 +111,11 @@ class MT5Gateway:
         with self.lock:
             ok = self.mt5.initialize(path=self.terminal_path) if self.terminal_path else self.mt5.initialize()
             if not ok:
-                raise NotConnected(f"Could not attach to MT5: {self.mt5.last_error()}")
+                err = self.mt5.last_error()
+                raise NotConnected(f"Could not attach to MT5: {err}", connection_hint(err))
             acct = self.mt5.account_info()
-            if acct is None:
-                raise NotConnected(f"MT5 is running but not logged in: {self.mt5.last_error()}")
+            if acct is None or not acct.login:
+                raise NotConnected(f"MT5 is running but not logged in: {self.mt5.last_error()}", NOT_LOGGED_IN)
             expected = self.account_id.login if self.account_id else None
             try:
                 self._check_account(acct, expected)
@@ -138,7 +161,9 @@ class MT5Gateway:
         with self.lock:
             acct = self.mt5.account_info()
             if acct is None:
-                raise NotConnected(f"account_info failed: {self.mt5.last_error()}")
+                raise self._not_connected("account_info")
+            if not acct.login:
+                raise NotConnected("MT5 is no longer logged in", NOT_LOGGED_IN)
             self._check_account(acct, self.account_id.login if self.account_id else None)
 
     def health(self) -> Health:
@@ -147,9 +172,20 @@ class MT5Gateway:
             if ti is None:
                 return Health(False, False, False, None, None)
             acct = self.mt5.account_info()
-            login = acct.login if acct else None
+            login = (acct.login or None) if acct else None
             is_demo = (acct.trade_mode == self.mt5.ACCOUNT_TRADE_MODE_DEMO) if acct else None
             return Health(True, bool(ti.connected), bool(ti.trade_allowed), login, is_demo)
+
+    def _not_connected(self, what: str) -> NotConnected:
+        err = self.mt5.last_error()
+        return NotConnected(f"{what} failed: {err}", connection_hint(err))
+
+    def _refused(self, what: str) -> Exception:
+        """A None result: the terminal is gone (NotConnected) or it refused the request itself."""
+        err = self.mt5.last_error()
+        if isinstance(err, tuple) and err and err[0] in IPC_ERRORS:
+            return NotConnected(f"{what} failed: {err}", connection_hint(err))
+        return SafetyError("request", f"MT5 refused the {what} request: {err}")
 
     def shutdown(self) -> None:
         with self.lock:
@@ -163,28 +199,28 @@ class MT5Gateway:
         with self.lock:
             acct = self.mt5.account_info()
             if acct is None:
-                raise NotConnected(f"account_info failed: {self.mt5.last_error()}")
+                raise self._not_connected("account_info")
             return acct
 
     def symbol_info(self) -> Any:
         with self.lock:
             info = self.mt5.symbol_info(self.symbol)
             if info is None:
-                raise NotConnected(f"symbol_info failed: {self.mt5.last_error()}")
+                raise self._not_connected("symbol_info")
             return info
 
     def tick(self) -> Any:
         with self.lock:
             t = self.mt5.symbol_info_tick(self.symbol)
             if t is None:
-                raise NotConnected(f"symbol_info_tick failed: {self.mt5.last_error()}")
+                raise self._not_connected("symbol_info_tick")
             return t
 
     def rates(self, timeframe: int, start_pos: int, count: int):
         with self.lock:
             r = self.mt5.copy_rates_from_pos(self.symbol, timeframe, start_pos, count)
             if r is None:
-                raise NotConnected(f"copy_rates_from_pos failed: {self.mt5.last_error()}")
+                raise self._not_connected("copy_rates_from_pos")
             return r
 
     def rates_range_server(self, timeframe: int, from_server_epoch: int, to_server_epoch: int):
@@ -192,7 +228,7 @@ class MT5Gateway:
         with self.lock:
             r = self.mt5.copy_rates_range(self.symbol, timeframe, datetime.fromtimestamp(from_server_epoch, UTC), datetime.fromtimestamp(to_server_epoch, UTC))
             if r is None:
-                raise NotConnected(f"copy_rates_range failed: {self.mt5.last_error()}")
+                raise self._not_connected("copy_rates_range")
             return r
 
     # ------------------------------------------------------------ bot positions / orders / deals
@@ -200,28 +236,28 @@ class MT5Gateway:
         with self.lock:
             ps = self.mt5.positions_get(symbol=self.symbol)
             if ps is None:
-                raise NotConnected(f"positions_get failed: {self.mt5.last_error()}")
+                raise self._not_connected("positions_get")
             return [p for p in ps if p.magic == self.magic and p.symbol == self.symbol]
 
     def bot_orders(self) -> list[Any]:
         with self.lock:
             os_ = self.mt5.orders_get(symbol=self.symbol)
             if os_ is None:
-                raise NotConnected(f"orders_get failed: {self.mt5.last_error()}")
+                raise self._not_connected("orders_get")
             return [o for o in os_ if o.magic == self.magic and o.symbol == self.symbol]
 
     def bot_deals(self, from_server_epoch: int, to_server_epoch: int) -> list[Any]:
         with self.lock:
             ds = self.mt5.history_deals_get(datetime.fromtimestamp(from_server_epoch, UTC), datetime.fromtimestamp(to_server_epoch, UTC))
             if ds is None:
-                raise NotConnected(f"history_deals_get failed: {self.mt5.last_error()}")
+                raise self._not_connected("history_deals_get")
             return [d for d in ds if d.magic == self.magic and d.symbol == self.symbol]
 
     def position_deals(self, position_ticket: int) -> list[Any]:
         with self.lock:
             ds = self.mt5.history_deals_get(position=position_ticket)
             if ds is None:
-                raise NotConnected(f"history_deals_get failed: {self.mt5.last_error()}")
+                raise self._not_connected("history_deals_get")
             return [d for d in ds if d.magic == self.magic]
 
     # ------------------------------------------------------------ trading
@@ -244,7 +280,7 @@ class MT5Gateway:
         with self.lock:
             res = self.mt5.order_check(request)
             if res is None:
-                raise NotConnected(f"order_check failed: {self.mt5.last_error()}")
+                raise self._refused("order_check")
             return res
 
     def order_send(self, request: dict, gate: Callable[[], str | None] | None = None) -> Any:
@@ -253,7 +289,7 @@ class MT5Gateway:
             self.verify_demo()
             ti = self.mt5.terminal_info()
             if ti is None:
-                raise NotConnected(f"terminal_info failed: {self.mt5.last_error()}")
+                raise self._not_connected("terminal_info")
             if not ti.trade_allowed:
                 raise SafetyError("algo_off", "Algo Trading is off in the MT5 terminal.")
             if gate is not None:
@@ -266,7 +302,7 @@ class MT5Gateway:
                 raise SafetyError("symbol", f"Refusing to send an order for {request.get('symbol')}.")
             res = self.mt5.order_send(request)
             if res is None:
-                raise NotConnected(f"order_send failed: {self.mt5.last_error()}")
+                raise self._refused("order_send")
             return res
 
     def retcode_name(self, code: int) -> str:
