@@ -36,15 +36,18 @@ if not errorlevel 1 exit /b 0
 echo Installing dependencies (about a minute)...
 rem --no-compile: no .pyc files at install time, whose long paths can exceed Windows' 260-character limit.
 ".venv\Scripts\python.exe" -m pip install --quiet --no-compile --upgrade pip
-".venv\Scripts\python.exe" -m pip install --quiet --no-compile -r requirements.txt
+".venv\Scripts\python.exe" -m pip install --quiet --no-compile --find-links wheels -r requirements.txt
 if errorlevel 1 goto :pipfail
 copy /y requirements.txt .venv\requirements.installed >nul
 exit /b 0
 
 :findpython
-rem Prefer 64-bit Python 3.13, 3.12, 3.11, then 3.14 through the py launcher; fall back to python on PATH.
+rem Prefer 64-bit Python 3.13, 3.12, 3.11, then 3.14 through the py launcher (the classic one takes -3.13-64,
+rem the newer Python install manager takes -3.13); then the default py, then python on PATH.
 set "PY="
 for %%V in (3.13 3.12 3.11 3.14) do if not defined PY call :trypython py -%%V-64
+for %%V in (3.13 3.12 3.11 3.14) do if not defined PY call :trypython py -%%V
+if not defined PY call :trypython py
 if not defined PY call :trypython python
 if not defined PY exit /b 1
 exit /b 0

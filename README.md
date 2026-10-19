@@ -33,7 +33,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ## 3. Check everything, then start
 
-You need 64-bit Python 3.11–3.14 from python.org (3.13 recommended), with "Add python.exe to PATH" ticked. The launchers pick a suitable 64-bit Python by themselves and create a `.venv` folder with the dependencies on first use (about a minute, internet needed once).
+You need 64-bit Python 3.11–3.14 from python.org (3.13 or 3.14), with "Add python.exe to PATH" ticked if the installer offers it; the newer Python install manager works too. The launchers pick a suitable 64-bit Python by themselves and create a `.venv` folder with the dependencies on first use (about a minute, internet needed once).
 
 1. **Double-click `check.bat`.** It attaches to the terminal and prints what Opus Trader relies on: account and server, demo and hedging, currency, Algo Trading, the EURUSD specification (tick value and size, volume min/step/max, stops and freeze level, filling and expiration modes), and the detected broker time. Then it runs **one real dry-run cycle** on the last closed bar: a real snapshot, a real Opus call, the risk engine and `order_check` on the order it would send. Nothing is sent to MT5, and the cycle is stored in `data/check.sqlite`, not your journal.
 2. **Double-click `start.bat`** to run the bot. The app opens in its own window. If the window can't open (no WebView2 runtime), the UI opens in your browser instead.
@@ -104,6 +104,7 @@ The **Indicator only** benchmark trades every flip on its own: entry at the flip
 | `data/opus_trader.sqlite` | The record: decisions (full snapshot, exact prompt, raw response, tokens, cost, verdict), orders with retcodes, trades in EUR and R, equity per bar, the benchmark, engine events and every settings change. |
 | `data/logs/opus_trader.log` | Rotating text log. |
 | `STOP` | Create it to trigger the kill switch. |
+| `wheels/` | A pre-built copy of a small pywebview dependency that PyPI only ships as source, so the first install needs no build step. |
 
 ## Development
 
