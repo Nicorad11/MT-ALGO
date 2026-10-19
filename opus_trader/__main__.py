@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
-    p = argparse.ArgumentParser(prog="opus_trader", description="Claude Opus 5.5 paper-trades EUR/USD on a MetaTrader 5 demo account.")
+    p = argparse.ArgumentParser(prog="opus_trader", description="Claude Opus 5.5 trades the major forex pairs on a MetaTrader 5 demo account.")
     p.add_argument("command", nargs="?", default="run", choices=["run", "check", "flips"])
     p.add_argument("--sim", action="store_true", help="preview against a simulated terminal and a rule-based stand-in for Opus")
     p.add_argument("--seed-days", type=float, default=2.0, help="with --sim: days of simulated history to generate first (default 2)")
@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--csv", help="flips: read bars from a CSV (time, open, high, low, close) instead of MT5")
     p.add_argument("--bars", type=int, default=5000, help="flips: number of closed M15 bars to load from MT5 (default 5000)")
     p.add_argument("--count", type=int, default=20, help="flips: how many flips to print (default 20)")
+    p.add_argument("--symbol", help="flips: pair to load from MT5 (default: the first pair in config.yaml)")
     args = p.parse_args(argv)
 
     if args.command == "check":

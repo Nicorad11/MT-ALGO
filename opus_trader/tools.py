@@ -34,13 +34,14 @@ def print_decision(store: Store, decision_id: int | None) -> int:
         return 1
     d = store.one("SELECT * FROM decisions WHERE id=?", (decision_id,))
     print("\nDecision")
+    line("Pair", "all pairs" if d["symbol"] == "ALL" else d["symbol"])
     line("Bar (UTC)", d["bar_time"])
     if d["status"] == "SKIPPED":
         line("Skipped", d["skip_reason"])
         return 0
     line("Action", f"{d['action']} {d['order_type'] or ''}".strip())
     if d["stop_loss"]:
-        line("Stop / target", f"{d['stop_loss']:.5f} / {d['take_profit']:.5f}" if d["take_profit"] else f"{d['stop_loss']:.5f}")
+        line("Stop / target", f"{d['stop_loss']:g} / {d['take_profit']:g}" if d["take_profit"] else f"{d['stop_loss']:g}")
     line("Confidence / setup", f"{d['confidence']} · {d['setup']}")
     line("Verdict", f"{d['verdict']}: {d['verdict_reason']}", d["verdict"] not in ("ERROR", "NO_DECISION", "FAILED"))
     line("Model", f"{d['model']} ({d['llm_status']}, {d['stop_reason']})")
@@ -80,7 +81,7 @@ def run_check(args) -> int:
     cfg_mgr.persist = False  # dry run is forced for the check; config.yaml is not changed
     cfg_mgr.update({"app.dry_run": True}, source="check", allow_locked=True)
     cfg = cfg_mgr.cfg
-    gw = MT5Gateway(mt5, cfg.app.symbol, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
+    gw = MT5Gateway(mt5, cfg.app.symbols, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
     print("Terminal and account")
     try:
         acct_id = gw.connect()
@@ -107,33 +108,37 @@ def run_check(args) -> int:
     line("Broker connection", "connected" if ti.connected else "NOT connected", bool(ti.connected))
     line("Algo Trading", "on" if ti.trade_allowed else "OFF (turn it on in the toolbar)", bool(ti.trade_allowed))
 
-    info = gw.symbol_info()
-    print(f"\n{gw.symbol} specification")
-    if gw.symbol != cfg.app.symbol:
-        line("Symbol name", f"{gw.symbol} (config says {cfg.app.symbol}; this broker adds a suffix, which is handled)", True)
-    line("Digits / point", f"{info.digits} / {info.point}")
-    line("Tick size / tick value", f"{info.trade_tick_size} / {info.trade_tick_value:.4f} {acct.currency} (loss {getattr(info, 'trade_tick_value_loss', 0):.4f})")
-    line("Volume min / step / max", f"{info.volume_min} / {info.volume_step} / {info.volume_max}")
-    line("Stops level / freeze level", f"{info.trade_stops_level} / {info.trade_freeze_level} points")
     names = {mt5.ORDER_FILLING_IOC: "IOC", mt5.ORDER_FILLING_FOK: "FOK", mt5.ORDER_FILLING_RETURN: "RETURN"}
-    line("Filling modes to try", " → ".join(names[m] for m in gw.filling_candidates()))
-    line("Limit order expiry", "specified time (broker expires it)" if gw.supports_specified_expiration() else "GTC (Opus Trader removes it at expiry)")
-    pip = SymbolSpec.from_info(info).pip
-    tick = gw.tick()
-    spread = (tick.ask - tick.bid) / pip
-    line("Bid / ask now", f"{tick.bid:.{info.digits}f} / {tick.ask:.{info.digits}f}")
-    line("Spread now", f"{spread:.1f} pips (bars are skipped above {cfg.risk.max_spread_pips:g})", spread <= cfg.risk.max_spread_pips)
     modes = {mt5.SYMBOL_TRADE_MODE_FULL: "full", mt5.SYMBOL_TRADE_MODE_DISABLED: "disabled", mt5.SYMBOL_TRADE_MODE_CLOSEONLY: "close only",
              mt5.SYMBOL_TRADE_MODE_LONGONLY: "long only", mt5.SYMBOL_TRADE_MODE_SHORTONLY: "short only"}
-    line("Trading", modes.get(info.trade_mode, str(info.trade_mode)), info.trade_mode == mt5.SYMBOL_TRADE_MODE_FULL)
-    others = [o for o in (mt5.symbols_get(group=f"*{cfg.app.symbol}*") or ())
-              if o.name != gw.symbol and o.name.upper().startswith(cfg.app.symbol.upper())]
-    for o in others:
-        o_spread = f"spread {(o.ask - o.bid) / SymbolSpec.from_info(o).pip:.1f} pips" if o.bid and o.ask else "no quote (not in Market Watch)"
-        line("Also at this broker", f"{o.name}: {o_spread}, trading {modes.get(o.trade_mode, o.trade_mode)}")
-    if spread > cfg.risk.max_spread_pips:
-        print(f"     {'':<28}Every bar is skipped while the spread is this wide. If a symbol listed above has a normal")
-        print(f"     {'':<28}spread and full trading, set app.symbol to it in config.yaml and start again.")
+    wide = []
+    print(f"\nPairs ({len(cfg.app.symbols)} in config.yaml; spread limit {cfg.risk.max_spread_pips:g} pips)")
+    for wanted in cfg.app.symbols:
+        if wanted in gw.unavailable:
+            line(wanted, gw.unavailable[wanted], False)
+            continue
+        sym = gw.broker_name(wanted)
+        info = gw.symbol_info(sym)
+        spec = SymbolSpec.from_info(info)
+        tick = gw.tick(sym)
+        spread = (tick.ask - tick.bid) / spec.pip
+        ok = spread <= cfg.risk.max_spread_pips and info.trade_mode == mt5.SYMBOL_TRADE_MODE_FULL
+        label = wanted if sym == wanted else f"{wanted} = {sym}"
+        line(label, f"bid {tick.bid:.{info.digits}f} · spread {spread:.1f} pips · {info.digits} digits · trading "
+                    f"{modes.get(info.trade_mode, str(info.trade_mode))} · lots {info.volume_min:g}-{info.volume_max:g} step {info.volume_step:g}", ok)
+        print(f"     {'':<28}tick value {info.trade_tick_value:.4f} {acct.currency} · stops/freeze {info.trade_stops_level}/{info.trade_freeze_level} points · "
+              f"filling {' → '.join(names[m] for m in gw.filling_candidates(sym))} · limit expiry "
+              f"{'by broker' if gw.supports_specified_expiration(sym) else 'by Opus Trader (GTC)'}")
+        if spread > cfg.risk.max_spread_pips:
+            wide.append(wanted)
+            for o in (mt5.symbols_get(group=f"*{wanted[:6]}*") or ()):
+                if o.name != sym and o.name.upper().startswith(wanted[:6].upper()):
+                    o_spread = f"spread {(o.ask - o.bid) / SymbolSpec.from_info(o).pip:.1f} pips" if o.bid and o.ask else "no quote (not in Market Watch)"
+                    print(f"     {'':<28}also at this broker: {o.name}, {o_spread}, trading {modes.get(o.trade_mode, o.trade_mode)}")
+    if wide:
+        print(f"     {'':<28}Bars are skipped while a spread is above {cfg.risk.max_spread_pips:g} pips ({', '.join(wide)} right now). Spreads are often wider")
+        print(f"     {'':<28}outside London and New York hours. If a variant listed above trades with a normal spread, put its name in")
+        print(f"     {'':<28}app.symbols in config.yaml instead; or raise Max spread in Settings.")
 
     st = ServerTime()
     t1 = gw.tick()
@@ -158,22 +163,24 @@ def run_check(args) -> int:
         print(f"\n  !! {problem}. Run check again and paste your key when asked (or put it in .env).")
         return 1
 
-    print("\nOne dry-run cycle on the last closed M15 bar (real snapshot, real Opus call, risk engine, order_check)...")
+    first = gw.available_symbols()[0]
+    print(f"\nOne dry-run cycle on {first}, last closed M15 bar (real snapshot, real Opus call, risk engine, order_check)...")
+    print("  (Only the first pair is checked, to keep the cost of the check to one Opus call.)")
     check_db = ROOT / "data" / "check.sqlite"
     if check_db.exists():
         check_db.unlink()
     store = Store(check_db)
     cfg_mgr.store = store
     news = NewsCalendar(YamlEventSource(ROOT / cfg.news.events_file), cfg.news.currencies)
-    gw2 = MT5Gateway(mt5, cfg.app.symbol, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
+    gw2 = MT5Gateway(mt5, cfg.app.symbols, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
     engine = Engine(config=cfg_mgr, gateway=gw2, llm=OpusClient(os.environ.get("ANTHROPIC_API_KEY")), store=store, news=news,
                     clock=Clock(), root=ROOT, read_only=True)
 
     async def cycle():
         await engine.start(run_tasks=False)
-        did = await engine.process_bar(last_closed_bar_open(engine.clock.now()), wait=False, force=True)
+        ids = await engine.process_bar(last_closed_bar_open(engine.clock.now()), wait=False, force=True, symbols=[first])
         await engine.shutdown()
-        return did
+        return ids[0] if ids else None
 
     did = asyncio.run(cycle())
     if engine.forced_precheck:
@@ -219,7 +226,7 @@ def run_flips(args) -> int:
         from .mt5_gateway import MT5Gateway
         from .snapshot import Bars
 
-        gw = MT5Gateway(mt5, cfg.app.symbol, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
+        gw = MT5Gateway(mt5, [args.symbol] if args.symbol else cfg.app.symbols, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
         gw.connect()
         st = ServerTime()
         for _ in range(2):
@@ -235,9 +242,11 @@ def run_flips(args) -> int:
         print(f"Warning: only {len(c)} bars; use at least 1000 so the ATR matches TradingView.")
     s = ts.compute(h, lo, c, sc.atr_length, sc.multiplier, sc.atr_method)
     idx = s.flip_indices()[-args.count:]
+    digits = 3 if float(np.median(c)) > 20 else 5  # JPY pairs quote around 150 with 3 decimals
+    pip = 0.01 if digits == 3 else 0.0001
     print(f"Trend Signals flips ({source}; ATR {sc.atr_length} × {sc.multiplier}, method {sc.atr_method}). Times are bar OPEN times in UTC.\n")
     print(f"  {'bar open (UTC)':<18}{'signal':<8}{'close':>10}{'line after':>12}{'ATR pips':>10}")
     for i in idx:
-        print(f"  {times[i]:%Y-%m-%d %H:%M}  {'BUY' if s.buy[i] else 'SELL':<8}{c[i]:>10.5f}{s.line(int(i)):>12.5f}{s.atr[i] / 0.0001:>10.1f}")
+        print(f"  {times[i]:%Y-%m-%d %H:%M}  {'BUY' if s.buy[i] else 'SELL':<8}{c[i]:>10.{digits}f}{s.line(int(i)):>12.{digits}f}{s.atr[i] / pip:>10.1f}")
     print("\nIn TradingView, set the chart timezone to UTC to compare the bar times directly.")
     return 0

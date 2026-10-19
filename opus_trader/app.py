@@ -179,7 +179,7 @@ def build_engine(args) -> tuple[Engine, object | None]:
     store = Store(DATA / "opus_trader.sqlite")
     config = ConfigManager(CONFIG_PATH, store)
     cfg = config.cfg
-    gateway = MT5Gateway(mt5, cfg.app.symbol, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
+    gateway = MT5Gateway(mt5, cfg.app.symbols, cfg.app.magic, os.environ.get("MT5_TERMINAL_PATH"))
     news = NewsCalendar(YamlEventSource(ROOT / cfg.news.events_file), cfg.news.currencies)
     llm = OpusClient(os.environ.get("ANTHROPIC_API_KEY") or None)
     return Engine(config=config, gateway=gateway, llm=llm, store=store, news=news, clock=Clock(), root=ROOT), None
@@ -362,11 +362,13 @@ def run_once(args) -> int:
 
         await engine.start(run_tasks=False)
         bar_open = last_closed_bar_open(engine.clock.now())
-        did = await engine.safe_process_bar(bar_open, wait=False)
+        ids = await engine.safe_process_bar(bar_open, wait=False)
         await engine.shutdown()
-        return did
+        return ids
 
-    did = asyncio.run(main())
+    ids = asyncio.run(main())
     from .tools import print_decision
 
-    return print_decision(engine.store, did)
+    if not ids:
+        return print_decision(engine.store, None)
+    return max(print_decision(engine.store, did) for did in ids)

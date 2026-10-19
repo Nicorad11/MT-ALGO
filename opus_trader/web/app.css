@@ -226,6 +226,14 @@ main { min-height: 0; position: relative; }
 .recent-list .t { color: var(--muted); }
 .recent-list .a { font-weight: 600; white-space: nowrap; }
 .recent-list .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.board li { grid-template-columns: 56px 72px minmax(0, 1fr) auto; }
+.board li[aria-current="true"] { background: var(--accent-tint); }
+.board .p { font-weight: 600; font-size: 12px; letter-spacing: 0.02em; }
+.board .o { font-size: 12px; white-space: nowrap; }
+.pair-select { width: auto; min-width: 104px; height: 28px; font-weight: 600; }
+.pair { display: inline-block; min-width: 52px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; }
+.pair-chip { font-size: 12px; font-weight: 600; color: var(--text); margin-left: 4px; letter-spacing: 0.02em; }
+.pos-list { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 
 .statusline { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 24px; border-top: 1px solid var(--border); font-size: 12px; white-space: nowrap; overflow: hidden; }
 .statusline .sep { opacity: .6; }
@@ -285,7 +293,8 @@ main { min-height: 0; position: relative; }
 .metrics td:first-child span[data-tip] { border-bottom: 1px dotted var(--muted); cursor: help; }
 .equity-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 360px; position: relative; overflow: hidden; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px 4px; }
-.bars-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.bars-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+@media (max-width: 1279px) { .bars-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .bars-row .panel { padding: 12px 16px 16px; }
 .rbars { margin-top: 8px; display: grid; grid-template-columns: minmax(0, max-content) minmax(48px, 1fr) max-content max-content; gap: 6px 8px; align-items: center; }
 .rbar { display: contents; font-size: 12px; }
@@ -376,3 +385,9 @@ button[data-tip], .badge[data-tip] { cursor: pointer; }
   .recent-list li { padding-top: 2px; padding-bottom: 2px; }
 }
 .equity-panel .chart-empty { inset: 36px 0 0 0; }
+
+/* Pairs in Settings */
+.pair-grid { display: grid; grid-template-columns: repeat(4, minmax(96px, auto)); gap: 8px 16px; }
+.pair-check { color: var(--text); font-weight: 600; font-size: 13px; }
+.pair-check.warn span { color: var(--warning); }
+.pairs-row .setting-control { flex-wrap: wrap; }

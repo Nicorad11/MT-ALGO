@@ -80,7 +80,7 @@ def test_journal_filters_and_detail(client, env):
     assert [o["purpose"] for o in d["orders"]] == ["check", "open"]
     assert d["thinking"] is None  # the scripted model returns an empty thinking block
     raw = client.get(f"/api/journal/{did}/raw").json()
-    assert "HOLD is the default" in raw["system"] and raw["prompt"].startswith("## H4 candles")
+    assert "HOLD is the default" in raw["system"] and raw["prompt"].startswith("# EURUSD\n\n## EURUSD H4 candles")
 
 
 def test_journal_csv(client):

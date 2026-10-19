@@ -16,7 +16,7 @@
   <header class="topbar">
     <div class="brand">
       <span class="brand-name">Opus Trader</span>
-      <span class="muted" id="symbol-label">EURUSD · M15</span>
+      <span class="muted" id="symbol-label" data-tip="Opus decides each pair separately after every M15 candle.">M15</span>
     </div>
     <div class="topbar-center">
       <span class="pill" id="status-pill" data-state="starting"><span class="pill-dot" aria-hidden="true"></span><span id="status-text">Starting…</span></span>
@@ -59,7 +59,7 @@
           <div class="kpi-sub num" id="kpi-today-pct"></div>
         </div>
         <div class="kpi kpi-wide">
-          <div class="kpi-label" data-tip="R is profit or loss in units of the money risked when the trade was opened: +1R made back the full risk.">Open position</div>
+          <div class="kpi-label" id="kpi-position-label" data-tip="The bot's open positions and pending orders on all pairs. R is profit or loss in units of the money risked: +1R made back the full risk.">Open trades</div>
           <div class="kpi-value" id="kpi-position">Flat</div>
           <div class="kpi-sub num" id="kpi-position-sub"></div>
         </div>
@@ -73,6 +73,7 @@
       <div class="live-body">
         <div class="panel chart-panel">
           <div class="chart-toolbar">
+            <select class="field pair-select" id="chart-pair" aria-label="Pair shown on the chart"></select>
             <div class="seg seg-sm" role="group" aria-label="Chart">
               <button type="button" data-chart="price" aria-pressed="true">Price</button>
               <button type="button" data-chart="equity" aria-pressed="false">Equity</button>
@@ -87,11 +88,11 @@
         <aside class="panel side">
           <div class="card" id="latest-card">
             <div class="card-head">
-              <span class="eyebrow">Latest call</span>
+              <span class="eyebrow">Latest call <span id="latest-pair"></span></span>
               <span class="muted num" id="latest-time"></span>
             </div>
             <div class="reject" id="latest-reject" hidden></div>
-            <div class="thinking" id="latest-thinking" hidden><span class="spinner" aria-hidden="true"></span><span>Opus is thinking… <span class="num" id="thinking-secs">0s</span></span></div>
+            <div class="thinking" id="latest-thinking" hidden><span class="spinner" aria-hidden="true"></span><span><span id="thinking-what">Opus is thinking…</span> <span class="num" id="thinking-secs">0s</span></span></div>
             <div id="latest-body">
               <div class="call-row">
                 <span class="action-word" id="latest-action">—</span>
@@ -105,8 +106,8 @@
             <p class="empty" id="latest-empty" hidden></p>
           </div>
           <div class="recent">
-            <div class="eyebrow">Recent</div>
-            <ol class="recent-list" id="recent-list"></ol>
+            <div class="eyebrow" data-tip="Each pair's latest decision. Click a pair to show it on the chart.">Pairs</div>
+            <ol class="recent-list board" id="pair-board"></ol>
           </div>
         </aside>
       </div>
@@ -128,6 +129,7 @@
           <button type="button" data-filter="rejected" aria-pressed="false">Rejected</button>
           <button type="button" data-filter="holds" aria-pressed="false">Holds</button>
         </div>
+        <select class="field pair-select" id="journal-pair" aria-label="Pair"><option value="">All pairs</option></select>
         <input type="search" class="search" id="journal-search" placeholder="Search reasoning, setup…" aria-label="Search the journal">
         <span class="grow"></span>
         <a class="btn" id="journal-export" href="/api/journal.csv" download>Export CSV</a>
@@ -151,7 +153,7 @@
       <div class="stats-top">
         <div class="panel metrics-panel">
           <table class="metrics" id="metrics">
-            <thead><tr><th></th><th class="r"><span class="lg lg-opus"></span>Opus</th><th class="r" data-tip="A shadow strategy that trades every Trend Signals flip on its own: entry at the flip close, stop on the trailing line, same risk per trade, spread included. Never sent to MT5."><span class="lg lg-bench"></span>Indicator only</th></tr></thead>
+            <thead><tr><th></th><th class="r"><span class="lg lg-opus"></span>Opus</th><th class="r" data-tip="A shadow strategy that trades every Trend Signals flip on every pair on its own: entry at the flip close, stop on the trailing line, same risk per trade, spread included. Never sent to MT5."><span class="lg lg-bench"></span>Indicator only</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -165,6 +167,7 @@
         <div class="panel"><div class="eyebrow">R by setup</div><div class="rbars" id="bars-setup"></div></div>
         <div class="panel"><div class="eyebrow" data-tip="Confidence Opus gave the trade, from 1 (marginal) to 5 (exceptional).">R by confidence</div><div class="rbars" id="bars-conf"></div></div>
         <div class="panel"><div class="eyebrow" data-tip="Session when the trade was opened (UTC): Asia 21–07, London 07–12, overlap 12–16, New York 16–21.">R by session</div><div class="rbars" id="bars-session"></div></div>
+        <div class="panel"><div class="eyebrow" data-tip="Total R of the trades on each pair.">R by pair</div><div class="rbars" id="bars-pair"></div></div>
       </div>
     </section>
 

@@ -174,8 +174,9 @@ class MinuteMarket:
         return o, h, lo, c
 
 
-def synthetic_market(start_utc: datetime, end_utc: datetime, seed: int = 7, start_price: float = 1.1600) -> MinuteMarket:
-    """Deterministic EUR/USD-like minute path with sessions, trends and ranges."""
+def synthetic_market(start_utc: datetime, end_utc: datetime, seed: int = 7, start_price: float = 1.1600, pip: float = 0.0001,
+                     digits: int = 5, vol: float = 1.0, spread_pips: float = 0.7) -> MinuteMarket:
+    """Deterministic forex-like minute path with sessions, trends and ranges (EUR/USD-like by default)."""
     rng = np.random.default_rng(seed)
     t0 = int(start_utc.replace(second=0, microsecond=0).timestamp())
     t1 = int(end_utc.timestamp())
@@ -189,14 +190,14 @@ def synthetic_market(start_utc: datetime, end_utc: datetime, seed: int = 7, star
     utc_hour = (times // 3600) % 24
     # Per-minute volatility (pips) by session.
     vol_by_hour = np.array([0.55, 0.5, 0.5, 0.5, 0.55, 0.6, 0.8, 1.3, 1.5, 1.45, 1.3, 1.2, 1.5, 1.7, 1.6, 1.45, 1.1, 0.95, 0.8, 0.7, 0.6, 0.45, 0.5, 0.55])
-    sigma = vol_by_hour[utc_hour] * 0.00014
+    sigma = vol_by_hour[utc_hour] * 1.4 * pip * vol
     # Regime-switching drift: trends of random length and direction, plus ranges.
     drift = np.zeros(n)
     i = 0
     while i < n:
         length = int(rng.exponential(420)) + 60
         kind = rng.random()
-        mu = 0.0 if kind < 0.4 else rng.normal(0, 0.06) * 0.0001
+        mu = 0.0 if kind < 0.4 else rng.normal(0, 0.06) * pip * vol
         drift[i : i + length] = mu
         i += length
     # Gentle pull towards start_price keeps the path in a realistic band.
@@ -210,12 +211,38 @@ def synthetic_market(start_utc: datetime, end_utc: datetime, seed: int = 7, star
         for k in range(SUBSTEPS):
             price = price + (drift[j] + pull) / SUBSTEPS + step_sigma * shocks[j, k]
             sub[j, k + 1] = price
-    sub = np.round(sub, 5)
-    base_spread = np.where((utc_hour >= 7) & (utc_hour < 17), 7, 11)
+    sub = np.round(sub, digits)
+    points_per_pip = round(pip / 10.0 ** -digits)
+    day = max(1, round(spread_pips * points_per_pip))
+    base_spread = np.where((utc_hour >= 7) & (utc_hour < 17), day, day + round(0.4 * points_per_pip))
     rollover = (utc_hour == 21) | (utc_hour == 22)
-    spread = base_spread + rng.integers(0, 3, n) + np.where(rollover, 14, 0)
+    spread = base_spread + rng.integers(0, 3, n) + np.where(rollover, round(1.4 * points_per_pip), 0)
     volume = rng.poisson(np.maximum(5, vol_by_hour[utc_hour] * 60))
     return MinuteMarket(times, sub, spread, volume)
+
+
+# The seven majors as the fake terminal and --sim quote them: start price, digits, volatility, typical spread (pips).
+MAJORS = {
+    "EURUSD": (1.1600, 5, 1.0, 0.7),
+    "GBPUSD": (1.3400, 5, 1.3, 1.0),
+    "USDJPY": (151.20, 3, 1.3, 0.8),
+    "USDCHF": (0.8000, 5, 0.9, 1.2),
+    "AUDUSD": (0.6550, 5, 0.8, 0.9),
+    "USDCAD": (1.3800, 5, 0.8, 1.3),
+    "NZDUSD": (0.5850, 5, 0.75, 1.4),
+}
+
+
+def major_market(name: str, start_utc: datetime, end_utc: datetime, seed: int = 7) -> MinuteMarket:
+    price, digits, vol, spread = MAJORS[name]
+    offset = list(MAJORS).index(name)
+    return synthetic_market(start_utc, end_utc, seed=seed + 101 * offset if offset else seed, start_price=price,
+                            pip=0.01 if digits <= 3 else 0.0001, digits=digits, vol=vol, spread_pips=spread)
+
+
+def major_spec(name: str) -> "SymbolSpec":
+    digits = MAJORS[name][1]
+    return SymbolSpec(name=name, digits=digits, point=10.0 ** -digits, trade_tick_size=10.0 ** -digits)
 
 
 # ---------------------------------------------------------------- the fake module
@@ -235,6 +262,13 @@ class SymbolSpec:
     filling_mode: int = 3  # FOK | IOC flags
     expiration_mode: int = 15  # GTC | DAY | SPECIFIED | SPECIFIED_DAY
     allow_return_filling: bool = False
+    currency_base: str = ""  # empty: taken from the name (EURUSD -> EUR)
+    currency_profit: str = ""  # empty: taken from the name (EURUSD -> USD)
+
+    def __post_init__(self):
+        core = self.name[:6].upper()
+        self.currency_base = self.currency_base or core[:3]
+        self.currency_profit = self.currency_profit or core[3:6]
 
 
 @dataclass
@@ -248,6 +282,7 @@ class _Pos:
     magic: int
     time: int
     comment: str = ""
+    symbol: str = "EURUSD"
 
 
 @dataclass
@@ -264,10 +299,25 @@ class _Order:
     expiration: int
     type_filling: int
     comment: str = ""
+    symbol: str = "EURUSD"
+
+
+class _Instrument:
+    """One symbol in the fake terminal: its specification, price path and server-time bar stamps."""
+
+    def __init__(self, spec: SymbolSpec, market: MinuteMarket, server_times: np.ndarray):
+        self.spec = spec
+        self.market = market
+        self.server_times = server_times
+        self.price_override: tuple[float, float] | None = None  # (bid, ask) for tests
 
 
 class FakeMT5:
-    """Instance behaves like the `MetaTrader5` module."""
+    """Instance behaves like the `MetaTrader5` module.
+
+    The first symbol (`spec`, `market`) is the primary one; `add_symbol` adds more.
+    `fake.spec`, `fake.market` and `fake.price_override` refer to the primary symbol.
+    """
 
     def __init__(
         self,
@@ -290,8 +340,6 @@ class FakeMT5:
             if name.isupper() and isinstance(value, int):
                 setattr(self, name, value)
         self.clock = clock
-        self.market = market
-        self.spec = spec or SymbolSpec()
         self.login = login
         self.server = server
         self.company = company
@@ -314,16 +362,40 @@ class FakeMT5:
         self._next_ticket = 50_000_001
         self._processed_until: float = clock.epoch()
         self._last_error = (RES_S_OK, "Success")
-        self.price_override: tuple[float, float] | None = None  # (bid, ask) for tests
         # Broker server clock: "ny7" (New York + 7 h) or an IANA zone such as "Europe/Warsaw".
+        self.server_tz = server_tz
         self.server_model = OffsetModel("ny7") if server_tz == "ny7" else OffsetModel("tz", tz=server_tz)
-        if server_tz == "ny7":
-            self._server_times = market.server_times
+        self.instruments: dict[str, _Instrument] = {}
+        self._primary = self.add_symbol(spec or SymbolSpec(), market)
+
+    def add_symbol(self, spec: SymbolSpec, market: MinuteMarket) -> _Instrument:
+        if self.server_tz == "ny7":
+            server_times = market.server_times
         else:
             hours = market.times // 3600
             uniq, inv = np.unique(hours, return_inverse=True)
             offs = np.array([self.server_model.offset_at(datetime.fromtimestamp(int(h) * 3600, UTC)) for h in uniq], dtype=np.int64)
-            self._server_times = market.times + offs[inv]
+            server_times = market.times + offs[inv]
+        inst = _Instrument(spec, market, server_times)
+        self.instruments[spec.name] = inst
+        return inst
+
+    # The primary symbol, for tests written against a one-symbol terminal.
+    @property
+    def spec(self) -> SymbolSpec:
+        return self._primary.spec
+
+    @property
+    def market(self) -> MinuteMarket:
+        return self._primary.market
+
+    @property
+    def price_override(self) -> tuple[float, float] | None:
+        return self._primary.price_override
+
+    @price_override.setter
+    def price_override(self, value: tuple[float, float] | None) -> None:
+        self._primary.price_override = value
 
     # ------------------------------------------------------------ helpers
     def _server_epoch(self, utc_epoch: float) -> int:
@@ -338,16 +410,21 @@ class FakeMT5:
             return False
         return True
 
-    def _quote(self, epoch: float | None = None) -> tuple[float, float, int, int] | None:
+    def _inst(self, symbol: str | None) -> _Instrument | None:
+        return self.instruments.get(symbol) if symbol else None
+
+    def _quote(self, inst: _Instrument | None = None, epoch: float | None = None) -> tuple[float, float, int, int] | None:
+        inst = inst or self._primary
         epoch = self.clock.epoch() if epoch is None else epoch
-        if self.price_override is not None:
-            bid, ask = self.price_override
-            return bid, ask, int(round((ask - bid) / self.spec.point)), int(epoch)
-        q = self.market.bid_at(epoch)
+        s = inst.spec
+        if inst.price_override is not None:
+            bid, ask = inst.price_override
+            return bid, ask, int(round((ask - bid) / s.point)), int(epoch)
+        q = inst.market.bid_at(epoch)
         if q is None:
             return None
         bid, spread, tick_epoch = q
-        ask = round(bid + spread * self.spec.point, self.spec.digits)
+        ask = round(bid + spread * s.point, s.digits)
         return bid, ask, spread, tick_epoch
 
     def _ticket(self) -> int:
@@ -355,19 +432,52 @@ class FakeMT5:
         self._next_ticket += 1
         return t
 
-    def _tick_value(self, price: float) -> float:
-        # EUR account, USD quote currency: one tick per lot = tick_size * contract / EURUSD.
-        return self.spec.trade_tick_size * self.spec.trade_contract_size / price
+    def _rate_of(self, base: str, quote: str) -> float | None:
+        """Bid of base/quote from a symbol in the terminal (or its inverse), if there is one."""
+        for inst in self.instruments.values():
+            s = inst.spec
+            q = None
+            if (s.currency_base, s.currency_profit) in ((base, quote), (quote, base)):
+                q = self._quote(inst)
+            if q and q[0] > 0:
+                return q[0] if s.currency_base == base else 1.0 / q[0]
+        return None
 
-    def _profit(self, pos_type: int, volume: float, open_price: float, close_price: float) -> float:
+    def _per_account(self, ccy: str) -> float:
+        """Units of `ccy` per one unit of the account currency (EUR): 1.16 for USD when EURUSD is 1.16."""
+        if ccy == self.currency:
+            return 1.0
+        direct = self._rate_of(self.currency, ccy)
+        if direct:
+            return direct
+        usd = self._rate_of(self.currency, "USD") or 1.16  # cross through USD, as brokers do
+        via = self._rate_of("USD", ccy)
+        return usd * via if via else usd
+
+    def _tick_value(self, inst: _Instrument, price: float) -> float:
+        s = inst.spec
+        if s.currency_base == self.currency and price > 0:  # EURUSD on an EUR account: converted at the symbol's own price
+            return s.trade_tick_size * s.trade_contract_size / price
+        return s.trade_tick_size * s.trade_contract_size / self._per_account(s.currency_profit)
+
+    def _profit(self, pos_type: int, volume: float, open_price: float, close_price: float, inst: _Instrument | None = None) -> float:
+        inst = inst or self._primary
+        s = inst.spec
         diff = (close_price - open_price) if pos_type == POSITION_TYPE_BUY else (open_price - close_price)
-        return round(diff * volume * self.spec.trade_contract_size / close_price, 2)
+        if s.currency_base == self.currency:
+            return round(diff * volume * s.trade_contract_size / close_price, 2)
+        return round(diff * volume * s.trade_contract_size / self._per_account(s.currency_profit), 2)
 
-    def _market_is_open(self, epoch: float | None = None) -> bool:
+    def _margin(self, inst: _Instrument, volume: float) -> float:
+        s = inst.spec
+        return volume * s.trade_contract_size / self.leverage / self._per_account(s.currency_base)
+
+    def _market_is_open(self, inst: _Instrument | None = None, epoch: float | None = None) -> bool:
+        inst = inst or self._primary
         epoch = self.clock.epoch() if epoch is None else epoch
-        if self.price_override is not None:
+        if inst.price_override is not None:
             return True
-        return self.market.index_at(epoch) >= 0
+        return inst.market.index_at(epoch) >= 0
 
     # ------------------------------------------------------------ broker-side processing
     def _process(self) -> None:
@@ -377,62 +487,76 @@ class FakeMT5:
         self._processed_until = now
         if now <= start or (not self.positions and not self.orders):
             return
-        if self.price_override is not None:
-            bid, ask = self.price_override
-            self._process_price(bid, ask, int(now))
-            return
-        i0 = max(0, self.market.last_index_before(start))
-        i1 = self.market.last_index_before(now)
-        if i1 < 0:
-            return
-        step = 60 / SUBSTEPS
-        for i in range(i0, i1 + 1):
-            for k in range(SUBSTEPS + 1):
-                t = self.market.times[i] + k * step
-                if t <= start or t > now:
+        for inst in self.instruments.values():
+            name = inst.spec.name
+            if not self._has_book(name):
+                continue
+            if inst.price_override is not None:
+                bid, ask = inst.price_override
+                self._process_price(inst, bid, ask, int(now))
+                continue
+            mk = inst.market
+            i0 = max(0, mk.last_index_before(start))
+            i1 = mk.last_index_before(now)
+            if i1 < 0:
+                continue
+            step = 60 / SUBSTEPS
+            for i in range(i0, i1 + 1):
+                for k in range(SUBSTEPS + 1):
+                    t = mk.times[i] + k * step
+                    if t <= start or t > now:
+                        continue
+                    bid = float(mk.sub[i, k])
+                    ask = round(bid + mk.spread[i] * inst.spec.point, inst.spec.digits)
+                    self._process_price(inst, bid, ask, int(t))
+                    if not self._has_book(name):
+                        break
+                else:
                     continue
-                bid = float(self.market.sub[i, k])
-                ask = round(bid + self.market.spread[i] * self.spec.point, self.spec.digits)
-                self._process_price(bid, ask, int(t))
-                if not self.positions and not self.orders:
-                    return
+                break
 
-    def _process_price(self, bid: float, ask: float, t_epoch: int) -> None:
+    def _has_book(self, symbol: str) -> bool:
+        return any(p.symbol == symbol for p in self.positions.values()) or any(o.symbol == symbol for o in self.orders.values())
+
+    def _process_price(self, inst: _Instrument, bid: float, ask: float, t_epoch: int) -> None:
         server_t = self._server_epoch(t_epoch)
-        for o in list(self.orders.values()):
+        name = inst.spec.name
+        pt = inst.spec.point
+        for o in [o for o in self.orders.values() if o.symbol == name]:
             if o.type_time == ORDER_TIME_SPECIFIED and o.expiration and server_t >= o.expiration:
                 del self.orders[o.ticket]
                 continue
             if (o.type == ORDER_TYPE_BUY_LIMIT and ask <= o.price_open) or (o.type == ORDER_TYPE_SELL_LIMIT and bid >= o.price_open):
                 del self.orders[o.ticket]
                 ptype = POSITION_TYPE_BUY if o.type == ORDER_TYPE_BUY_LIMIT else POSITION_TYPE_SELL
-                self.positions[o.ticket] = _Pos(o.ticket, ptype, o.volume, o.price_open, o.sl, o.tp, o.magic, server_t, o.comment)
-                self._deal(o.ticket, ptype, DEAL_ENTRY_IN, o.volume, o.price_open, o.magic, o.ticket, DEAL_REASON_EXPERT, 0.0, server_t, o.comment)
-        for p in list(self.positions.values()):
+                self.positions[o.ticket] = _Pos(o.ticket, ptype, o.volume, o.price_open, o.sl, o.tp, o.magic, server_t, o.comment, name)
+                self._deal(o.ticket, ptype, DEAL_ENTRY_IN, o.volume, o.price_open, o.magic, o.ticket, DEAL_REASON_EXPERT, 0.0, server_t, o.comment, name)
+        for p in [p for p in self.positions.values() if p.symbol == name]:
             if p.type == POSITION_TYPE_BUY:
                 if p.sl and bid <= p.sl:
-                    self._close(p, p.sl if bid >= p.sl - 50 * self.spec.point else bid, DEAL_REASON_SL, server_t, "[sl]")
+                    self._close(p, p.sl if bid >= p.sl - 50 * pt else bid, DEAL_REASON_SL, server_t, "[sl]")
                 elif p.tp and bid >= p.tp:
                     self._close(p, p.tp, DEAL_REASON_TP, server_t, "[tp]")
             else:
                 if p.sl and ask >= p.sl:
-                    self._close(p, p.sl if ask <= p.sl + 50 * self.spec.point else ask, DEAL_REASON_SL, server_t, "[sl]")
+                    self._close(p, p.sl if ask <= p.sl + 50 * pt else ask, DEAL_REASON_SL, server_t, "[sl]")
                 elif p.tp and ask <= p.tp:
                     self._close(p, p.tp, DEAL_REASON_TP, server_t, "[tp]")
 
-    def _deal(self, order, ptype, entry, volume, price, magic, position_id, reason, profit, server_t, comment) -> TradeDeal:
+    def _deal(self, order, ptype, entry, volume, price, magic, position_id, reason, profit, server_t, comment, symbol: str | None = None) -> TradeDeal:
         dtype = DEAL_TYPE_BUY if ptype == POSITION_TYPE_BUY else DEAL_TYPE_SELL
         if entry == DEAL_ENTRY_OUT:
             dtype = DEAL_TYPE_SELL if ptype == POSITION_TYPE_BUY else DEAL_TYPE_BUY
-        d = TradeDeal(self._ticket(), order, server_t, server_t * 1000, dtype, entry, magic, position_id, reason, volume, price, 0.0, 0.0, profit, 0.0, self.spec.name, comment, "")
+        d = TradeDeal(self._ticket(), order, server_t, server_t * 1000, dtype, entry, magic, position_id, reason, volume, price, 0.0, 0.0, profit, 0.0,
+                      symbol or self.spec.name, comment, "")
         self.deals.append(d)
         return d
 
     def _close(self, p: _Pos, price: float, reason: int, server_t: int, comment: str, order: int = 0) -> TradeDeal:
-        profit = self._profit(p.type, p.volume, p.price_open, price)
+        profit = self._profit(p.type, p.volume, p.price_open, price, self.instruments.get(p.symbol))
         self.balance = round(self.balance + profit, 2)
         del self.positions[p.ticket]
-        return self._deal(order or p.ticket, p.type, DEAL_ENTRY_OUT, p.volume, price, p.magic, p.ticket, reason, profit, server_t, comment)
+        return self._deal(order or p.ticket, p.type, DEAL_ENTRY_OUT, p.volume, price, p.magic, p.ticket, reason, profit, server_t, comment, p.symbol)
 
     # ------------------------------------------------------------ module API
     def initialize(self, path: str | None = None, **kwargs) -> bool:
@@ -462,14 +586,15 @@ class FakeMT5:
         if not self._alive():
             return None
         self._process()
-        q = self._quote()
         profit = 0.0
         margin = 0.0
-        if q:
-            bid, ask, _, _ = q
-            for p in self.positions.values():
-                profit += self._profit(p.type, p.volume, p.price_open, bid if p.type == POSITION_TYPE_BUY else ask)
-                margin += p.volume * self.spec.trade_contract_size / self.leverage
+        for p in self.positions.values():
+            inst = self.instruments.get(p.symbol)
+            q = self._quote(inst) if inst else None
+            if q:
+                bid, ask, _, _ = q
+                profit += self._profit(p.type, p.volume, p.price_open, bid if p.type == POSITION_TYPE_BUY else ask, inst)
+                margin += self._margin(inst, p.volume)
         equity = round(self.balance + profit, 2)
         free = round(equity - margin, 2)
         level = round(equity / margin * 100, 2) if margin else 0.0
@@ -481,34 +606,36 @@ class FakeMT5:
         """Symbols matching an MT5 group filter ("*EURUSD*", comma lists, "!" exclusions)."""
         if not self._alive():
             return None
+        names = list(self.instruments)
         if group:
             pats = [g.strip() for g in group.split(",") if g.strip()]
             inc = [p for p in pats if not p.startswith("!")] or ["*"]
             exc = [p[1:] for p in pats if p.startswith("!")]
-            ok = any(fnmatch.fnmatchcase(self.spec.name, p) for p in inc) and not any(fnmatch.fnmatchcase(self.spec.name, p) for p in exc)
-            if not ok:
-                return ()
-        return (self.symbol_info(self.spec.name),)
+            names = [n for n in names if any(fnmatch.fnmatchcase(n, p) for p in inc) and not any(fnmatch.fnmatchcase(n, p) for p in exc)]
+        return tuple(self.symbol_info(n) for n in names)
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         if not self._alive():
             return False
-        return symbol == self.spec.name
+        return symbol in self.instruments
 
     def symbol_info(self, symbol: str):
-        if not self._alive() or symbol != self.spec.name:
+        inst = self._inst(symbol)
+        if not self._alive() or inst is None:
             return None
-        s = self.spec
-        q = self._quote() or (0.0, 0.0, 0, 0)
-        tv = self._tick_value(q[0] or 1.16)
+        s = inst.spec
+        q = self._quote(inst) or (0.0, 0.0, 0, 0)
+        tv = self._tick_value(inst, q[0] or MAJORS.get(s.name[:6], (1.16,))[0])
         return SymbolInfo(s.name, True, True, s.digits, q[2], s.point, tv, tv, tv, s.trade_tick_size, s.trade_contract_size,
                           s.volume_min, s.volume_max, s.volume_step, s.trade_stops_level, s.trade_freeze_level,
-                          s.filling_mode, s.expiration_mode, SYMBOL_TRADE_MODE_FULL, q[0], q[1], self._server_epoch(q[3]) if q[3] else 0, "EUR", "USD", "EUR")
+                          s.filling_mode, s.expiration_mode, SYMBOL_TRADE_MODE_FULL, q[0], q[1], self._server_epoch(q[3]) if q[3] else 0,
+                          s.currency_base, s.currency_profit, s.currency_base)
 
     def symbol_info_tick(self, symbol: str):
-        if not self._alive() or symbol != self.spec.name:
+        inst = self._inst(symbol)
+        if not self._alive() or inst is None:
             return None
-        q = self._quote()
+        q = self._quote(inst)
         if q is None:
             return None
         bid, ask, _, tick_epoch = q
@@ -516,23 +643,25 @@ class FakeMT5:
         return Tick(st, bid, ask, 0.0, 0, st * 1000, 6, 0.0)
 
     def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int):
-        if not self._alive() or symbol != self.spec.name:
+        inst = self._inst(symbol)
+        if not self._alive() or inst is None:
             return None
         minutes = TF_MINUTES[timeframe]
         now = self.clock.epoch()
-        i_last = self.market.last_index_before(now)
+        i_last = inst.market.last_index_before(now)
         if i_last < 0:
             return np.zeros(0, dtype=RATE_DTYPE)
         # Bucket boundaries are aligned to server time, like a real terminal.
         need = (start_pos + count + 2) * minutes * 2 + 5000
         i0 = max(0, i_last + 1 - need)
-        bars = self._aggregate(i0, i_last + 1, minutes, upto=now)
+        bars = self._aggregate(inst, i0, i_last + 1, minutes, upto=now)
         if start_pos > 0:
             bars = bars[: len(bars) - start_pos] if start_pos < len(bars) else bars[:0]
         return bars[-count:].copy()
 
     def copy_rates_range(self, symbol: str, timeframe: int, date_from, date_to):
-        if not self._alive() or symbol != self.spec.name:
+        inst = self._inst(symbol)
+        if not self._alive() or inst is None:
             return None
         minutes = TF_MINUTES[timeframe]
         f = _as_epoch(date_from)
@@ -540,18 +669,18 @@ class FakeMT5:
         # Range arguments are compared with server-time epochs (MT5 quirk).
         uf = self._utc_epoch_from_server(f)
         ut = min(self._utc_epoch_from_server(t), self.clock.epoch())
-        i0 = max(0, int(np.searchsorted(self.market.times, uf - minutes * 60, side="left")))
-        i1 = int(np.searchsorted(self.market.times, ut, side="right"))
-        bars = self._aggregate(i0, i1, minutes, upto=self.clock.epoch())
+        i0 = max(0, int(np.searchsorted(inst.market.times, uf - minutes * 60, side="left")))
+        i1 = int(np.searchsorted(inst.market.times, ut, side="right"))
+        bars = self._aggregate(inst, i0, i1, minutes, upto=self.clock.epoch())
         sel = (bars["time"] >= f) & (bars["time"] <= t)
         return bars[sel].copy()
 
-    def _aggregate(self, i0: int, i1: int, minutes: int, upto: float):
-        mk = self.market
+    def _aggregate(self, inst: _Instrument, i0: int, i1: int, minutes: int, upto: float):
+        mk = inst.market
         if i1 <= i0:
             return np.zeros(0, dtype=RATE_DTYPE)
         o, h, lo, c = mk.m1(i0, i1, upto_epoch=upto)
-        server_times = self._server_times[i0:i1]
+        server_times = inst.server_times[i0:i1]
         bucket = server_times // (minutes * 60) * (minutes * 60)
         starts = np.flatnonzero(np.r_[True, bucket[1:] != bucket[:-1]])
         ends = np.r_[starts[1:], len(bucket)]
@@ -569,14 +698,17 @@ class FakeMT5:
         if not self._alive():
             return None
         self._process()
-        q = self._quote()
         out = []
         for p in self.positions.values():
             if ticket is not None and p.ticket != ticket:
                 continue
+            if symbol is not None and p.symbol != symbol:
+                continue
+            inst = self.instruments.get(p.symbol)
+            q = self._quote(inst) if inst else None
             cur = (q[0] if p.type == POSITION_TYPE_BUY else q[1]) if q else p.price_open
             out.append(TradePosition(p.ticket, p.time, p.time * 1000, p.time, p.time * 1000, p.type, p.magic, p.ticket, DEAL_REASON_EXPERT,
-                                     p.volume, p.price_open, p.sl, p.tp, cur, 0.0, self._profit(p.type, p.volume, p.price_open, cur), self.spec.name, p.comment, ""))
+                                     p.volume, p.price_open, p.sl, p.tp, cur, 0.0, self._profit(p.type, p.volume, p.price_open, cur, inst), p.symbol, p.comment, ""))
         return tuple(out)
 
     def positions_total(self):
@@ -587,14 +719,17 @@ class FakeMT5:
         if not self._alive():
             return None
         self._process()
-        q = self._quote()
         out = []
         for o in self.orders.values():
             if ticket is not None and o.ticket != ticket:
                 continue
+            if symbol is not None and o.symbol != symbol:
+                continue
+            inst = self.instruments.get(o.symbol)
+            q = self._quote(inst) if inst else None
             cur = (q[1] if o.type == ORDER_TYPE_BUY_LIMIT else q[0]) if q else o.price_open
             out.append(TradeOrder(o.ticket, o.time_setup, o.time_setup * 1000, 0, 0, o.expiration, o.type, o.type_time, o.type_filling, 1, o.magic, 0, 0, 3,
-                                  o.volume, o.volume, o.price_open, o.sl, o.tp, cur, 0.0, self.spec.name, o.comment, ""))
+                                  o.volume, o.volume, o.price_open, o.sl, o.tp, cur, 0.0, o.symbol, o.comment, ""))
         return tuple(out)
 
     def history_deals_get(self, date_from=None, date_to=None, group: str | None = None, ticket: int | None = None, position: int | None = None):
@@ -610,15 +745,28 @@ class FakeMT5:
         return tuple(d for d in self.deals if f <= d.time <= t)
 
     # ------------------------------------------------------------ trading
+    def _request_instrument(self, req: dict) -> _Instrument | None:
+        """The symbol a request is about: its `symbol`, or the position / order it names."""
+        if req.get("symbol"):
+            return self._inst(req["symbol"])
+        if req.get("position") in self.positions:
+            return self._inst(self.positions[req["position"]].symbol)
+        if req.get("order") in self.orders:
+            return self._inst(self.orders[req["order"]].symbol)
+        return None
+
     def _validate(self, req: dict, for_send: bool) -> tuple[int, str, dict]:
-        s = self.spec
         if not self.terminal_trade_allowed:
             return TRADE_RETCODE_CLIENT_DISABLES_AT, "AutoTrading disabled by client", {}
         if not self.connected:
             return TRADE_RETCODE_CONNECTION, "No connection with the trade server", {}
+        inst = self._request_instrument(req)
+        if inst is None:
+            return TRADE_RETCODE_INVALID, "Invalid request", {}
+        s = inst.spec
         action = req.get("action")
-        q = self._quote()
-        if q is None or not self._market_is_open():
+        q = self._quote(inst)
+        if q is None or not self._market_is_open(inst):
             return TRADE_RETCODE_MARKET_CLOSED, "Market closed", {}
         bid, ask, _, _ = q
         stops = s.trade_stops_level * s.point
@@ -642,7 +790,7 @@ class FakeMT5:
             pos_ticket = req.get("position")
             if pos_ticket:
                 p = self.positions.get(pos_ticket)
-                if p is None:
+                if p is None or p.symbol != s.name:
                     return TRADE_RETCODE_POSITION_CLOSED, "Position doesn't exist", {}
                 return 0, "Done", {"price": price}
             sl, tp = float(req.get("sl", 0) or 0), float(req.get("tp", 0) or 0)
@@ -652,7 +800,7 @@ class FakeMT5:
             else:
                 if (sl and (sl - ask) < stops - 1e-9) or (tp and (ask - tp) < stops - 1e-9) or (sl and sl <= ask) or (tp and tp >= ask):
                     return TRADE_RETCODE_INVALID_STOPS, "Invalid stops", {}
-            margin = vol * s.trade_contract_size / self.leverage
+            margin = self._margin(inst, vol)
             acct = self.account_info()
             if margin > acct.margin_free:
                 return TRADE_RETCODE_NO_MONEY, "No money", {}
@@ -679,7 +827,7 @@ class FakeMT5:
             return 0, "Done", {"price": price}
         if action == TRADE_ACTION_SLTP:
             p = self.positions.get(req.get("position"))
-            if p is None:
+            if p is None or p.symbol != s.name:
                 return TRADE_RETCODE_POSITION_CLOSED, "Position doesn't exist", {}
             freeze = s.trade_freeze_level * s.point
             cur = bid if p.type == POSITION_TYPE_BUY else ask
@@ -716,13 +864,15 @@ class FakeMT5:
         self._process()
         self.sent.append(dict(request))
         now_server = self._server_epoch(self.clock.epoch())
-        q = self._quote() or (0.0, 0.0, 0, 0)
+        inst = self._request_instrument(request)
+        q = (self._quote(inst) if inst else None) or (0.0, 0.0, 0, 0)
         if self.forced_retcodes:
             code = self.forced_retcodes.pop(0)
             return OrderSendResult(code, 0, 0, 0.0, 0.0, q[0], q[1], "Forced by test", 1, 0, _request(request))
         code, comment, info = self._validate(request, for_send=True)
         if code != 0:
             return OrderSendResult(code, 0, 0, 0.0, 0.0, q[0], q[1], comment, 1, 0, _request(request))
+        name = inst.spec.name
         action = request["action"]
         magic = int(request.get("magic", 0))
         if action == TRADE_ACTION_DEAL:
@@ -736,14 +886,15 @@ class FakeMT5:
                 return OrderSendResult(TRADE_RETCODE_DONE, d.ticket, order, vol, price, q[0], q[1], "Request executed", 1, 0, _request(request))
             ticket = self._ticket()
             ptype = POSITION_TYPE_BUY if request["type"] == ORDER_TYPE_BUY else POSITION_TYPE_SELL
-            self.positions[ticket] = _Pos(ticket, ptype, vol, price, float(request.get("sl", 0) or 0), float(request.get("tp", 0) or 0), magic, now_server, request.get("comment", ""))
-            d = self._deal(ticket, ptype, DEAL_ENTRY_IN, vol, price, magic, ticket, DEAL_REASON_EXPERT, 0.0, now_server, request.get("comment", ""))
+            self.positions[ticket] = _Pos(ticket, ptype, vol, price, float(request.get("sl", 0) or 0), float(request.get("tp", 0) or 0), magic, now_server,
+                                          request.get("comment", ""), name)
+            d = self._deal(ticket, ptype, DEAL_ENTRY_IN, vol, price, magic, ticket, DEAL_REASON_EXPERT, 0.0, now_server, request.get("comment", ""), name)
             return OrderSendResult(TRADE_RETCODE_DONE, d.ticket, ticket, vol, price, q[0], q[1], "Request executed", 1, 0, _request(request))
         if action == TRADE_ACTION_PENDING:
             ticket = self._ticket()
             self.orders[ticket] = _Order(ticket, request["type"], float(request["volume"]), float(request["price"]), float(request.get("sl", 0) or 0),
                                          float(request.get("tp", 0) or 0), magic, now_server, request.get("type_time", ORDER_TIME_GTC),
-                                         int(request.get("expiration", 0) or 0), request.get("type_filling", ORDER_FILLING_RETURN), request.get("comment", ""))
+                                         int(request.get("expiration", 0) or 0), request.get("type_filling", ORDER_FILLING_RETURN), request.get("comment", ""), name)
             return OrderSendResult(TRADE_RETCODE_PLACED, 0, ticket, float(request["volume"]), 0.0, q[0], q[1], "Request executed", 1, 0, _request(request))
         if action == TRADE_ACTION_SLTP:
             p = self.positions[request["position"]]
@@ -756,15 +907,16 @@ class FakeMT5:
         return OrderSendResult(TRADE_RETCODE_INVALID, 0, 0, 0.0, 0.0, q[0], q[1], "Invalid request", 1, 0, _request(request))
 
     # ------------------------------------------------------------ test helpers
-    def add_manual_position(self, type_: int, volume: float, price: float, sl: float = 0.0, tp: float = 0.0, magic: int = 0) -> int:
+    def add_manual_position(self, type_: int, volume: float, price: float, sl: float = 0.0, tp: float = 0.0, magic: int = 0, symbol: str | None = None) -> int:
         """A trade opened by hand in the terminal (magic 0 by default)."""
         ticket = self._ticket()
-        self.positions[ticket] = _Pos(ticket, type_, volume, price, sl, tp, magic, self._server_epoch(self.clock.epoch()), "manual")
+        self.positions[ticket] = _Pos(ticket, type_, volume, price, sl, tp, magic, self._server_epoch(self.clock.epoch()), "manual", symbol or self.spec.name)
         return ticket
 
-    def add_manual_order(self, type_: int, volume: float, price: float, magic: int = 0) -> int:
+    def add_manual_order(self, type_: int, volume: float, price: float, magic: int = 0, symbol: str | None = None) -> int:
         ticket = self._ticket()
-        self.orders[ticket] = _Order(ticket, type_, volume, price, 0.0, 0.0, magic, self._server_epoch(self.clock.epoch()), ORDER_TIME_GTC, 0, ORDER_FILLING_RETURN, "manual")
+        self.orders[ticket] = _Order(ticket, type_, volume, price, 0.0, 0.0, magic, self._server_epoch(self.clock.epoch()), ORDER_TIME_GTC, 0, ORDER_FILLING_RETURN,
+                                     "manual", symbol or self.spec.name)
         return ticket
 
 

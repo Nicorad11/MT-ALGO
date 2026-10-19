@@ -4,7 +4,7 @@
   const { $, $$, fmt, api } = window.Opus;
   const Opus = window.Opus;
 
-  const S = { filter: "all", q: "", items: [], next: null, loading: false, open: new Set(), details: new Map(), holds: 0, focus: null };
+  const S = { filter: "all", q: "", pair: "", items: [], next: null, loading: false, open: new Set(), details: new Map(), holds: 0, focus: null };
   let searchTimer = null;
 
   const cur = () => (Opus.state && Opus.state.kpis && Opus.state.kpis.currency) || "EUR";
@@ -14,7 +14,7 @@
     if (S.loading) return;
     S.loading = true;
     if (reset) { S.items = []; S.next = null; }
-    const params = new URLSearchParams({ filter: S.filter, q: S.q, limit: "60" });
+    const params = new URLSearchParams({ filter: S.filter, q: S.q, symbol: S.pair, limit: "60" });
     if (!reset && S.next) params.set("before", S.next);
     try {
       const data = await api(`/api/journal?${params}`);
@@ -28,7 +28,7 @@
       S.loading = false;
       $("#journal-more").hidden = !S.next;
     }
-    $("#journal-export").href = `/api/journal.csv?${new URLSearchParams({ filter: S.filter, q: S.q })}`;
+    $("#journal-export").href = `/api/journal.csv?${new URLSearchParams({ filter: S.filter, q: S.q, symbol: S.pair })}`;
   }
 
   // Collapse runs of identical skips ("SKIP ×8 Weekend window").
@@ -36,7 +36,7 @@
     const out = [];
     for (const it of items) {
       const prev = out[out.length - 1];
-      if (prev && it.kind === "decision" && it.status === "SKIPPED" && prev.kind === "decision" && prev.status === "SKIPPED" && prev.summary === it.summary) {
+      if (prev && it.kind === "decision" && it.status === "SKIPPED" && prev.kind === "decision" && prev.status === "SKIPPED" && prev.summary === it.summary && prev.symbol === it.symbol) {
         prev.count = (prev.count || 1) + 1;
         prev.first_time = it.time;
         prev.first_bar = it.bar_time;
@@ -80,16 +80,22 @@
     return d ? new Date(d.getTime() + 15 * 60000).toISOString() : null;
   }
 
+  function pairTag(it) {
+    if (!it.symbol) return "";
+    return `<span class="pair">${it.symbol === "ALL" ? "ALL" : fmt.esc(it.symbol)}</span> `;
+  }
+
   function row(it) {
     const id = String(it.id);
     const open = S.open.has(id);
     const dry = it.mode === "dry" ? '<span class="tag" title="Dry run: simulated">DRY</span>' : "";
+    const pair = pairTag(it);
     if (it.kind === "trade") {
       const side = it.side === "long" ? '<span class="act-long">▲ Long</span>' : '<span class="act-short">▼ Short</span>';
       return `<div class="jrow${open ? " open" : ""}" data-id="${id}" data-kind="trade">
         <div class="jhead" tabindex="0" role="button" aria-expanded="${open}">
           <span class="t num">${fmt.hm(it.time)}</span><span class="a">TRADE</span>
-          <span class="s">${side} closed · ${fmt.esc(EXIT[it.exit_reason] || it.exit_reason || "")}${it.setup ? ` · <span class="muted">${fmt.esc(it.setup)}</span>` : ""}</span>
+          <span class="s">${pair}${side} closed · ${fmt.esc(EXIT[it.exit_reason] || it.exit_reason || "")}${it.setup ? ` · <span class="muted">${fmt.esc(it.setup)}</span>` : ""}</span>
           <span class="end num"><span class="${fmt.cls(it.r)}">${fmt.r(it.r)}</span><span class="${fmt.cls(it.pnl)}">${fmt.money(it.pnl, cur(), true)}</span>${dry}</span>
           <span class="chev" aria-hidden="true">›</span>
         </div>${open ? '<div class="jdetail"></div>' : ""}</div>`;
@@ -100,7 +106,7 @@
       const label = it.count ? `SKIP ×${it.count}` : "SKIP";
       const range = it.count ? ` (${fmt.hm(barClose(it.first_bar))} – ${time})` : "";
       return `<div class="jrow static" data-id="${id}"><div class="jhead"><span class="t num">${time}</span><span class="a act-skip">${label}</span>
-        <span class="s muted">${fmt.esc(it.summary)}${range} · model not called</span><span class="end">${dry}</span><span></span></div></div>`;
+        <span class="s muted">${pair}${fmt.esc(it.summary)}${range} · ${it.symbol === "ALL" ? "no pair was" : "model not"} called</span><span class="end">${dry}</span><span></span></div></div>`;
     }
     const conf = it.confidence ? `<span class="muted num" title="Confidence ${it.confidence} of 5">${"●".repeat(it.confidence)}${"○".repeat(5 - it.confidence)}</span> ` : "";
     let summary = "";
@@ -112,7 +118,7 @@
     return `<div class="jrow${open ? " open" : ""}" data-id="${id}" data-kind="decision">
       <div class="jhead" tabindex="0" role="button" aria-expanded="${open}">
         <span class="t num">${time}</span><span class="a ${a.cls}">${a.text}</span>
-        <span class="s">${conf}${summary}</span>
+        <span class="s">${pair}${conf}${summary}</span>
         <span class="end">${ag ? `<span class="tag">${ag}</span>` : ""}${dry}</span>
         <span class="chev" aria-hidden="true">›</span>
       </div>${open ? '<div class="jdetail"></div>' : ""}</div>`;
@@ -155,9 +161,10 @@
   function fact(label, value) { return `<span><b>${label}</b>${value}</span>`; }
 
   function tradeDetail(t) {
+    const n = t.digits || 5;
     return `<div><h3>Trade</h3><div class="facts num">
-      ${fact("Side", t.side === "long" ? "▲ Long" : "▼ Short")}${fact("Lots", fmt.num(t.volume, 2))}
-      ${fact("Open", `${fmt.price(t.open_price)} at ${fmt.dayTime(t.open_time)} UTC`)}${fact("Close", `${fmt.price(t.close_price)} at ${fmt.dayTime(t.time)} UTC`)}
+      ${fact("Pair", fmt.esc(t.symbol || ""))}${fact("Side", t.side === "long" ? "▲ Long" : "▼ Short")}${fact("Lots", fmt.num(t.volume, 2))}
+      ${fact("Open", `${fmt.price(t.open_price, n)} at ${fmt.dayTime(t.open_time)} UTC`)}${fact("Close", `${fmt.price(t.close_price, n)} at ${fmt.dayTime(t.time)} UTC`)}
       ${fact("Result", `<span class="${fmt.cls(t.r)}">${fmt.r(t.r)}</span> · <span class="${fmt.cls(t.pnl)}">${fmt.money(t.pnl, cur(), true)}</span>`)}
       ${fact("Exit", fmt.esc(EXIT[t.exit_reason] || t.exit_reason || ""))}</div></div>
       ${t.decision_id ? `<div><button class="link" data-open-decision="${t.decision_id}" type="button">Show the decision that opened it</button></div>` : ""}`;
@@ -169,17 +176,19 @@
       parts.push(`<div><h3>Reasoning</h3><p>${fmt.esc(d.reasoning)}</p>${d.invalidation ? `<p class="muted" style="margin-top:4px"><b style="color:var(--text);font-weight:600">Invalidation:</b> ${fmt.esc(d.invalidation)}</p>` : ""}${d.thinking ? `<details class="think-summary"><summary>How Opus thought it through (summary)</summary><p>${fmt.esc(d.thinking)}</p></details>` : ""}</div>`);
     }
     const w = d.saw;
+    const n = d.digits || 5;
     if (w) {
       const cur = w.currency || "EUR";
-      const pos = w.position ? `${w.position.side === "long" ? "▲ Long" : "▼ Short"} ${fmt.num(w.position.volume, 2)} @ ${fmt.price(w.position.entry)} (${fmt.r(w.position.unrealized_r)})`
-        : w.pending ? `Pending ${w.pending.side} limit @ ${fmt.price(w.pending.price)}` : "Flat";
-      const sig = w.signal ? `${w.signal.trend === "up" ? "▲ Up" : "▼ Down"}${w.signal.bars_since_flip != null ? `, ${w.signal.bars_since_flip} bars since flip` : ""}${w.signal.flipped_now ? `, flipped ${w.signal.flip_now} this bar` : ""} · line ${fmt.price(w.signal.line)} (${fmt.num(w.signal.line_distance_pips, 1)} pips)` : "—";
+      const pos = w.position ? `${w.position.side === "long" ? "▲ Long" : "▼ Short"} ${fmt.num(w.position.volume, 2)} @ ${fmt.price(w.position.entry, n)} (${fmt.r(w.position.unrealized_r)})`
+        : w.pending ? `Pending ${w.pending.side} limit @ ${fmt.price(w.pending.price, n)}` : "Flat";
+      const others = (w.others || []).map((o) => `${o.side === "long" ? "▲" : "▼"} ${fmt.esc(o.symbol)}${o.kind === "pending" ? " limit" : o.unrealized_r != null ? ` ${fmt.r(o.unrealized_r)}` : ""}`).join(", ");
+      const sig = w.signal ? `${w.signal.trend === "up" ? "▲ Up" : "▼ Down"}${w.signal.bars_since_flip != null ? `, ${w.signal.bars_since_flip} bars since flip` : ""}${w.signal.flipped_now ? `, flipped ${w.signal.flip_now} this bar` : ""} · line ${fmt.price(w.signal.line, n)} (${fmt.num(w.signal.line_distance_pips, 1)} pips)` : "—";
       const ev = (w.events || []).length ? w.events.map((e) => `${e.currency} ${fmt.esc(e.title)} ${fmt.hm(e.time)}`).join(", ") : "None";
       parts.push(`<div><h3>What Opus saw</h3><div class="facts num">
-        ${fact("Bid/Ask", `${fmt.price(w.bid)} / ${fmt.price(w.ask)}`)}${fact("Spread", fmt.pips(w.spread_pips))}${fact("ATR", fmt.pips(w.atr_pips))}
+        ${fact("Pair", fmt.esc(d.symbol || ""))}${fact("Bid/Ask", `${fmt.price(w.bid, n)} / ${fmt.price(w.ask, n)}`)}${fact("Spread", fmt.pips(w.spread_pips))}${fact("ATR", fmt.pips(w.atr_pips))}
         ${fact("RSI", fmt.num(w.rsi, 1))}${fact("Session", fmt.esc(w.session))}${fact("M15 EMAs", w.ema_order)}
-        ${w.asian_range ? fact("Asian range", `${fmt.price(w.asian_range[0])}–${fmt.price(w.asian_range[1])}`) : ""}
-        ${fact("Book", pos)}${fact("Today", fmt.money(w.today_pnl, cur, true))}${fact("Trend Signals", sig)}${fact("Events (4 h)", ev)}
+        ${w.asian_range ? fact("Asian range", `${fmt.price(w.asian_range[0], n)}–${fmt.price(w.asian_range[1], n)}`) : ""}
+        ${fact("This pair", pos)}${fact("Other pairs", others || "None")}${fact("Today", fmt.money(w.today_pnl, cur, true))}${fact("Trend Signals", sig)}${fact("Events (4 h)", ev)}
         ${w.bars_sent ? fact("Candles", `${w.bars_sent.M15} M15 · ${w.bars_sent.H1} H1 · ${w.bars_sent.H4} H4`) : ""}
       </div></div>`);
     }
@@ -188,7 +197,7 @@
     const calc = c.stop_pips != null ? `${fact("Stop", `${fmt.num(c.stop_pips, 1)} pips (${fmt.num(c.stop_atr, 2)}× ATR)`)}${fact("R:R", fmt.num(c.rr, 2))}${c.lots ? fact("Size", `${fmt.num(c.lots, 2)} lots`) + fact("Risk", `${fmt.money(c.risk_eur, cur())} (${fmt.num(c.risk_pct, 2)}%)`) : ""}` : "";
     parts.push(`<div><h3>Risk engine</h3><p><span class="${d.verdict === "APPROVED" ? "" : d.verdict === "HOLD" ? "muted" : "warn"}">${verdictText}</span>${d.verdict_reason && d.verdict !== "HOLD" ? `: ${fmt.esc(d.verdict_reason)}` : ""}</p>${calc ? `<div class="facts num" style="margin-top:4px">${calc}</div>` : ""}</div>`);
     if ((d.orders || []).length) {
-      parts.push(`<div><h3>Orders</h3>${d.orders.map((o) => `<p class="num" style="font-size:12px"><span class="${o.ok ? "" : "warn"}">${fmt.esc(o.purpose)}</span> · retcode ${o.retcode ?? "—"} ${fmt.esc(o.retcode_name || "")}${o.order_ticket ? ` · #${o.order_ticket}` : ""}${o.price ? ` · ${fmt.price(o.price)}` : ""}${o.volume ? ` · ${fmt.num(o.volume, 2)} lots` : ""} · ${fmt.esc(o.comment || "")}</p>`).join("")}</div>`);
+      parts.push(`<div><h3>Orders</h3>${d.orders.map((o) => `<p class="num" style="font-size:12px"><span class="${o.ok ? "" : "warn"}">${fmt.esc(o.purpose)}</span> · retcode ${o.retcode ?? "—"} ${fmt.esc(o.retcode_name || "")}${o.order_ticket ? ` · #${o.order_ticket}` : ""}${o.price ? ` · ${fmt.price(o.price, n)}` : ""}${o.volume ? ` · ${fmt.num(o.volume, 2)} lots` : ""} · ${fmt.esc(o.comment || "")}</p>`).join("")}</div>`);
     }
     if (d.status === "CALLED") {
       const tokens = d.input_tokens != null ? `${(d.input_tokens + (d.cache_read_tokens || 0) + (d.cache_write_tokens || 0)).toLocaleString("en-US")} in (${(d.cache_read_tokens || 0).toLocaleString("en-US")} cached) · ${(d.output_tokens || 0).toLocaleString("en-US")} out` : "—";
@@ -231,6 +240,14 @@
         $$("#view-journal [data-filter]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
         load(true);
       }));
+      $("#journal-pair").addEventListener("change", (e) => { S.pair = e.target.value; load(true); });
+      const fillPairs = () => {
+        const sel = $("#journal-pair");
+        const pairs = Opus.pairs();
+        const html = '<option value="">All pairs</option>' + pairs.map((p) => `<option value="${fmt.esc(p)}">${fmt.esc(p)}</option>`).join("");
+        if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; sel.value = pairs.includes(S.pair) ? S.pair : ""; }
+      };
+      Opus.on("status", fillPairs);
       $("#journal-search").addEventListener("input", (e) => {
         clearTimeout(searchTimer);
         searchTimer = setTimeout(() => { S.q = e.target.value.trim(); load(true); }, 250);

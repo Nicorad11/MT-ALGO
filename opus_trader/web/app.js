@@ -101,20 +101,45 @@
 
   // ------------------------------------------------------------ app state + events
   const bus = {};
+  let savedPair = null;
+  try { savedPair = localStorage.getItem("opus-pair"); } catch (e) { /* storage unavailable */ }
+
   const Opus = (window.Opus = {
     $, $$, fmt, api, actionLabel, agreeLabel,
     status: null, state: null, skewMs: 0, view: null, views: {},
+    pair: savedPair,  // the pair shown on the Live chart and latest-call card
     on(evt, fn) { (bus[evt] = bus[evt] || []).push(fn); },
     emit(evt, data) { (bus[evt] || []).forEach((fn) => { try { fn(data); } catch (e) { console.error(e); } }); },
     serverNow() { return Date.now() + Opus.skewMs; },
     css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); },
     toast,
     openDialog,
+    pairs() { return (Opus.status && Opus.status.symbols) || []; },
+    pairInfo(sym) { return ((Opus.status && Opus.status.pairs) || []).find((p) => p.symbol === sym) || null; },
+    digits(sym) { const p = Opus.pairInfo(sym || Opus.pair); return p ? p.digits : 5; },
+    pairName(sym) { return sym === "ALL" ? "All pairs" : (sym || ""); },
+    setPair(sym) {
+      if (!sym || sym === Opus.pair) return;
+      Opus.pair = sym;
+      try { localStorage.setItem("opus-pair", sym); } catch (e) { /* storage unavailable */ }
+      Opus.emit("pair", sym);
+      refreshState();
+    },
   });
+
+  // Keep the selected pair valid when the traded pairs change.
+  function checkPair(s) {
+    const list = s.symbols || [];
+    if (list.length && !list.includes(Opus.pair)) {
+      Opus.pair = list[0];
+      Opus.emit("pair", Opus.pair);
+      scheduleRefresh();
+    }
+  }
 
   async function refreshState() {
     try {
-      Opus.state = await api("/api/state");
+      Opus.state = await api(`/api/state${Opus.pair ? `?symbol=${encodeURIComponent(Opus.pair)}` : ""}`);
       Opus.emit("state", Opus.state);
       if (Opus.state.status) applyStatus(Opus.state.status);
     } catch (e) {
@@ -160,7 +185,9 @@
     if (s.status === "blocked") text = "Stopped: not allowed";
     setPill(s.status, text);
 
-    $("#symbol-label").textContent = `${s.symbol || "EURUSD"} · M15`;
+    const n = (s.symbols || []).length;
+    $("#symbol-label").textContent = n > 1 ? `${n} pairs · M15` : `${(s.symbols || [s.symbol || ""])[0]} · M15`;
+    checkPair(s);
     // DEMO only once the attached account has passed the demo check; nothing is shown before that.
     const acct = $("#badge-account");
     const verified = Boolean(s.account && s.account.login);
@@ -266,9 +293,9 @@
   $("#btn-stop").addEventListener("click", async () => {
     await refreshState();
     const st = Opus.state || {};
-    const p = st.position;
-    const pos = p && p.kind === "position" ? 1 : 0;
-    const pend = p && p.kind === "pending" ? 1 : 0;
+    const list = st.positions || [];
+    const pos = list.filter((p) => p.kind === "position").length;
+    const pend = list.filter((p) => p.kind === "pending").length;
     $("#dlg-stop-text").textContent =
       `Closes ${pos} position${pos === 1 ? "" : "s"} and cancels ${pend} pending order${pend === 1 ? "" : "s"} with magic ${st.magic ?? ""}. ` +
       "Your manual trades are not touched. The bot then stays halted until you press Resume.";

@@ -11,7 +11,7 @@ UTC = timezone.utc
 
 
 def add_closed_loss(store, mode, pnl, when):
-    store.insert("trades", {"mode": mode, "ticket": int(when.timestamp()) + int(-pnl * 100), "side": "long", "open_time": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    store.insert("trades", {"mode": mode, "symbol": "EURUSD", "ticket": int(when.timestamp()) + int(-pnl * 100), "side": "long", "open_time": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "open_price": 1.16, "volume": 0.1, "risk_eur": 50.0, "close_time": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "close_price": 1.159, "exit_reason": "sl", "pnl_eur": pnl, "r_multiple": pnl / 50, "status": "closed"})
 
@@ -97,7 +97,7 @@ def test_cooldown_after_loss_blocks_entries(tmp_path):
     try:
         add_closed_loss(env.store, "dry", -50.0, env.clock.now() - timedelta(minutes=10))
         d = env.decision(env.bar())
-        assert d["verdict"] == "REJECTED" and d["verdict_reason"] == "Cooldown after a loss: 2 bars left"
-        assert "cooldown after a loss, 2 bars left" in d["prompt_text"]
+        assert d["verdict"] == "REJECTED" and d["verdict_reason"] == "Cooldown after a loss on EURUSD: 2 bars left"
+        assert "cooldown after a loss on EURUSD, 2 bars left" in d["prompt_text"]
     finally:
         env.close()

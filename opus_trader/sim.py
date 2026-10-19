@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .clock import SimClock, next_bar_close
 from .config import Config, ConfigManager, save_config
-from .fake_mt5 import FakeMT5, synthetic_market
+from .fake_mt5 import MAJORS, FakeMT5, major_market, major_spec
 from .llm import FakeLLM
 from .mt5_gateway import MT5Gateway
 from .news import NewsCalendar, YamlEventSource
@@ -49,19 +49,28 @@ class SimEnv:
         now = (now or datetime.now(UTC)).astimezone(UTC)
         self.clock = SimClock(now)
         self.real_now = now
-        log.info("Building the synthetic market (a few seconds)...")
-        self.market = synthetic_market(now - timedelta(days=240), now + timedelta(days=30), seed=seed)
-        self.fake = FakeMT5(self.clock, self.market)
         self.store = Store(self.dir / "opus_trader.sqlite")
         cfg_path = self.dir / "config.yaml"
         if not cfg_path.exists():
             save_config(Config(), cfg_path)
         self.config = ConfigManager(cfg_path, self.store)
+        # Every major is quoted (so pairs can be switched on in Settings); a pair that isn't a major stays unavailable.
+        names = list(MAJORS)
+        log.info("Building synthetic markets for %d pairs (a few seconds each)...", len(names))
+        start, end = now - timedelta(days=240), now + timedelta(days=30)
+        self.fake = None
+        for name in names:
+            market = major_market(name, start, end, seed=seed)
+            if self.fake is None:
+                self.fake = FakeMT5(self.clock, market, spec=major_spec(name))
+            else:
+                self.fake.add_symbol(major_spec(name), market)
+        self.market = self.fake.market
         events = self.dir / "events.yaml"
         write_sim_events(events, now)
         self.news = NewsCalendar(YamlEventSource(events), self.config.cfg.news.currencies)
         self.llm = FakeLLM(seed=seed)
-        self.gateway = MT5Gateway(self.fake, self.config.cfg.app.symbol, self.config.cfg.app.magic)
+        self.gateway = MT5Gateway(self.fake, self.config.cfg.app.symbols, self.config.cfg.app.magic)
 
 
 async def seed_history(engine, env: SimEnv, days: float) -> int:
@@ -75,8 +84,7 @@ async def seed_history(engine, env: SimEnv, days: float) -> int:
     while t <= end:
         env.clock.set(t + timedelta(seconds=engine.cfg.app.bar_delay_s))
         bar_open = t - timedelta(minutes=15)
-        if await engine.safe_process_bar(bar_open, wait=False):
-            n += 1
+        n += len(await engine.safe_process_bar(bar_open, wait=False))
         t += timedelta(minutes=15)
     env.clock.set(end)
     env.clock.run_realtime()

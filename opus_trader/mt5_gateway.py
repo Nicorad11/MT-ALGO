@@ -40,6 +40,12 @@ class NotConnected(Exception):
         self.hint = hint  # what to do about it, in plain words (the banner and check.bat show it)
 
 
+class NoData(NotConnected):
+    """One symbol's call returned nothing while the terminal itself answers (history still loading, no quote yet).
+
+    A NotConnected, so code that doesn't care treats it like before; the engine catches it per pair."""
+
+
 def connection_hint(err: Any) -> str | None:
     """Plain-English advice for a MetaTrader5 last_error() tuple, if there is one."""
     code = err[0] if isinstance(err, tuple) and err else None
@@ -95,15 +101,42 @@ def _to_dict(rec: Any) -> dict:
 
 
 class MT5Gateway:
-    def __init__(self, mt5: Any, symbol: str, magic: int, terminal_path: str | None = None):
+    """One terminal connection for every traded symbol.
+
+    Per-symbol methods take a broker symbol name and default to the primary
+    symbol (the first configured one that the broker has), so a one-pair
+    gateway works as before. `view(symbol)` hands executors the same interface
+    bound to another pair.
+    """
+
+    def __init__(self, mt5: Any, symbols: str | list[str], magic: int, terminal_path: str | None = None):
         self.mt5 = mt5
-        self.configured_symbol = symbol
-        self.symbol = symbol  # resolved on connect (a broker may name it EURUSD.pro, EURUSDm, ...)
+        self.configured_symbols = [symbols] if isinstance(symbols, str) else list(symbols)
+        if not self.configured_symbols:
+            raise ValueError("At least one symbol is needed")
+        self.primary = self.configured_symbols[0]
+        self.names: dict[str, str] = {}  # configured name -> broker name (EURUSD -> EURUSD.pro), set on connect
+        self.unavailable: dict[str, str] = {}  # configured name -> why it can't be traded here
         self.magic = magic
         self.terminal_path = terminal_path or None
         self.lock = threading.RLock()
         self.account_id: AccountId | None = None
         self.retcode_names = {getattr(mt5, n): n.removeprefix("TRADE_RETCODE_") for n in dir(mt5) if n.startswith("TRADE_RETCODE_")}
+
+    @property
+    def configured_symbol(self) -> str:
+        return self.primary
+
+    @property
+    def symbol(self) -> str:
+        """Broker name of the primary symbol."""
+        return self.names.get(self.primary, self.primary)
+
+    def broker_name(self, configured: str) -> str:
+        return self.names.get(configured, configured)
+
+    def view(self, configured: str) -> "SymbolView":
+        return SymbolView(self, configured)
 
     # ------------------------------------------------------------ connection
     def connect(self) -> AccountId:
@@ -122,16 +155,39 @@ class MT5Gateway:
             except SafetyError:
                 self.mt5.shutdown()
                 raise
-            self.symbol = self._resolve_symbol()
+            self.resolve_symbols(self.configured_symbols)
             if self.mt5.symbol_info(self.symbol) is None:
                 raise NotConnected(f"No symbol info for {self.symbol}")
             self.account_id = AccountId(acct.login, acct.server, acct.company, acct.name, acct.currency, acct.trade_mode, acct.margin_mode, acct.leverage)
             log.info("Attached to MT5: account %s on %s (%s)", acct.login, acct.server, acct.currency)
             return self.account_id
 
-    def _resolve_symbol(self) -> str:
+    def resolve_symbols(self, configured: list[str]) -> None:
+        """Find each configured symbol at the broker. A pair the broker doesn't have is skipped, not fatal,
+        unless no pair at all can be traded."""
+        with self.lock:
+            self.configured_symbols = list(configured)
+            first_error: SafetyError | None = None
+            for wanted in self.configured_symbols:
+                try:
+                    self.names[wanted] = self._resolve_symbol(wanted)
+                    self.unavailable.pop(wanted, None)
+                except SafetyError as exc:
+                    self.names.pop(wanted, None)
+                    self.unavailable[wanted] = exc.message
+                    first_error = first_error or exc
+                    log.warning("%s", exc.message)
+            available = [c for c in self.configured_symbols if c in self.names]
+            if not available:
+                self.mt5.shutdown()
+                raise first_error or SafetyError("symbol", "No symbols configured", fatal=True)
+            self.primary = available[0]
+
+    def available_symbols(self) -> list[str]:
+        return [c for c in self.configured_symbols if c in self.names]
+
+    def _resolve_symbol(self, wanted: str) -> str:
         """The configured symbol, or its only broker variant (EURUSD -> EURUSD.pro)."""
-        wanted = self.configured_symbol
         if self.mt5.symbol_select(wanted, True):
             return wanted
         found = self.mt5.symbols_get(group=f"*{wanted}*") or ()
@@ -144,8 +200,8 @@ class MT5Gateway:
             return pick
         if names:
             raise SafetyError("symbol", f"{wanted} isn't in this MT5 terminal, but these are: {', '.join(names)}. "
-                                        f"Set app.symbol in config.yaml to the one you trade, then restart.", fatal=True)
-        raise SafetyError("symbol", f"No symbol like {wanted} in this MT5 terminal. Check app.symbol in config.yaml, then restart.", fatal=True)
+                                        f"Put the one you trade in app.symbols in config.yaml, then restart.", fatal=True)
+        raise SafetyError("symbol", f"No symbol like {wanted} in this MT5 terminal. Check app.symbols in config.yaml.", fatal=True)
 
     def _check_account(self, acct: Any, expected_login: int | None) -> None:
         mt5 = self.mt5
@@ -180,6 +236,13 @@ class MT5Gateway:
         err = self.mt5.last_error()
         return NotConnected(f"{what} failed: {err}", connection_hint(err))
 
+    def _no_data(self, what: str, symbol: str) -> NotConnected:
+        """NotConnected if the terminal is gone, NoData if only this symbol's data is missing."""
+        err = self.mt5.last_error()
+        if isinstance(err, tuple) and err and err[0] in IPC_ERRORS:
+            return NotConnected(f"{what} failed: {err}", connection_hint(err))
+        return NoData(f"{what} for {symbol} returned nothing: {err}")
+
     def _refused(self, what: str) -> Exception:
         """A None result: the terminal is gone (NotConnected) or it refused the request itself."""
         err = self.mt5.last_error()
@@ -202,56 +265,77 @@ class MT5Gateway:
                 raise self._not_connected("account_info")
             return acct
 
-    def symbol_info(self) -> Any:
+    def symbol_info(self, symbol: str | None = None) -> Any:
         with self.lock:
-            info = self.mt5.symbol_info(self.symbol)
+            info = self.mt5.symbol_info(symbol or self.symbol)
             if info is None:
                 raise self._not_connected("symbol_info")
             return info
 
-    def tick(self) -> Any:
+    def tick(self, symbol: str | None = None) -> Any:
         with self.lock:
-            t = self.mt5.symbol_info_tick(self.symbol)
+            sym = symbol or self.symbol
+            t = self.mt5.symbol_info_tick(sym)
             if t is None:
-                raise self._not_connected("symbol_info_tick")
+                raise self._no_data("symbol_info_tick", sym)
             return t
 
-    def rates(self, timeframe: int, start_pos: int, count: int):
+    def rates(self, timeframe: int, start_pos: int, count: int, symbol: str | None = None):
         with self.lock:
-            r = self.mt5.copy_rates_from_pos(self.symbol, timeframe, start_pos, count)
+            sym = symbol or self.symbol
+            r = self.mt5.copy_rates_from_pos(sym, timeframe, start_pos, count)
             if r is None:
-                raise self._not_connected("copy_rates_from_pos")
+                raise self._no_data("copy_rates_from_pos", sym)
             return r
 
-    def rates_range_server(self, timeframe: int, from_server_epoch: int, to_server_epoch: int):
+    def rates_range_server(self, timeframe: int, from_server_epoch: int, to_server_epoch: int, symbol: str | None = None):
         """Bars between two *server-time* epochs (MT5 compares range arguments with server time)."""
         with self.lock:
-            r = self.mt5.copy_rates_range(self.symbol, timeframe, datetime.fromtimestamp(from_server_epoch, UTC), datetime.fromtimestamp(to_server_epoch, UTC))
+            sym = symbol or self.symbol
+            r = self.mt5.copy_rates_range(sym, timeframe, datetime.fromtimestamp(from_server_epoch, UTC), datetime.fromtimestamp(to_server_epoch, UTC))
             if r is None:
-                raise self._not_connected("copy_rates_range")
+                raise self._no_data("copy_rates_range", sym)
             return r
 
     # ------------------------------------------------------------ bot positions / orders / deals
-    def bot_positions(self) -> list[Any]:
+    def bot_positions(self, symbol: str | None = None) -> list[Any]:
+        sym = symbol or self.symbol
         with self.lock:
-            ps = self.mt5.positions_get(symbol=self.symbol)
+            ps = self.mt5.positions_get(symbol=sym)
             if ps is None:
                 raise self._not_connected("positions_get")
-            return [p for p in ps if p.magic == self.magic and p.symbol == self.symbol]
+            return [p for p in ps if p.magic == self.magic and p.symbol == sym]
 
-    def bot_orders(self) -> list[Any]:
+    def bot_orders(self, symbol: str | None = None) -> list[Any]:
+        sym = symbol or self.symbol
         with self.lock:
-            os_ = self.mt5.orders_get(symbol=self.symbol)
+            os_ = self.mt5.orders_get(symbol=sym)
             if os_ is None:
                 raise self._not_connected("orders_get")
-            return [o for o in os_ if o.magic == self.magic and o.symbol == self.symbol]
+            return [o for o in os_ if o.magic == self.magic and o.symbol == sym]
 
-    def bot_deals(self, from_server_epoch: int, to_server_epoch: int) -> list[Any]:
+    def all_bot_positions(self) -> list[Any]:
+        """Every position carrying the bot's magic number, on any symbol."""
+        with self.lock:
+            ps = self.mt5.positions_get()
+            if ps is None:
+                raise self._not_connected("positions_get")
+            return [p for p in ps if p.magic == self.magic]
+
+    def all_bot_orders(self) -> list[Any]:
+        with self.lock:
+            os_ = self.mt5.orders_get()
+            if os_ is None:
+                raise self._not_connected("orders_get")
+            return [o for o in os_ if o.magic == self.magic]
+
+    def bot_deals(self, from_server_epoch: int, to_server_epoch: int, symbol: str | None = None) -> list[Any]:
+        sym = symbol or self.symbol
         with self.lock:
             ds = self.mt5.history_deals_get(datetime.fromtimestamp(from_server_epoch, UTC), datetime.fromtimestamp(to_server_epoch, UTC))
             if ds is None:
                 raise self._not_connected("history_deals_get")
-            return [d for d in ds if d.magic == self.magic and d.symbol == self.symbol]
+            return [d for d in ds if d.magic == self.magic and d.symbol == sym]
 
     def position_deals(self, position_ticket: int) -> list[Any]:
         with self.lock:
@@ -261,9 +345,9 @@ class MT5Gateway:
             return [d for d in ds if d.magic == self.magic]
 
     # ------------------------------------------------------------ trading
-    def filling_candidates(self) -> list[int]:
+    def filling_candidates(self, symbol: str | None = None) -> list[int]:
         """Filling modes to try, in order: IOC, then FOK (if the symbol allows them), then RETURN."""
-        info = self.symbol_info()
+        info = self.symbol_info(symbol)
         flags = int(info.filling_mode)
         modes = []
         if flags & SYMBOL_FILLING_IOC:
@@ -273,8 +357,8 @@ class MT5Gateway:
         modes.append(self.mt5.ORDER_FILLING_RETURN)
         return modes
 
-    def supports_specified_expiration(self) -> bool:
-        return bool(int(self.symbol_info().expiration_mode) & SYMBOL_EXPIRATION_SPECIFIED)
+    def supports_specified_expiration(self, symbol: str | None = None) -> bool:
+        return bool(int(self.symbol_info(symbol).expiration_mode) & SYMBOL_EXPIRATION_SPECIFIED)
 
     def order_check(self, request: dict) -> Any:
         with self.lock:
@@ -283,8 +367,9 @@ class MT5Gateway:
                 raise self._refused("order_check")
             return res
 
-    def order_send(self, request: dict, gate: Callable[[], str | None] | None = None) -> Any:
+    def order_send(self, request: dict, gate: Callable[[], str | None] | None = None, symbol: str | None = None) -> Any:
         """Send an order after re-checking every safety rule. Raises SafetyError if blocked."""
+        sym = symbol or self.symbol
         with self.lock:
             self.verify_demo()
             ti = self.mt5.terminal_info()
@@ -298,7 +383,7 @@ class MT5Gateway:
                     raise SafetyError("gate", reason)
             if int(request.get("magic", 0)) != self.magic:
                 raise SafetyError("magic", "Refusing to send an order without the bot's magic number.")
-            if request.get("symbol") not in (None, self.symbol):
+            if request.get("symbol") not in (None, sym):
                 raise SafetyError("symbol", f"Refusing to send an order for {request.get('symbol')}.")
             res = self.mt5.order_send(request)
             if res is None:
@@ -309,6 +394,70 @@ class MT5Gateway:
         if code == 0:
             return "OK"
         return self.retcode_names.get(code, str(code))
+
+
+class SymbolView:
+    """The gateway seen through one pair: the single-symbol interface the executors use."""
+
+    def __init__(self, gw: MT5Gateway, configured: str):
+        self._gw = gw
+        self.configured_symbol = configured
+        self.mt5 = gw.mt5
+        self.magic = gw.magic
+        self.lock = gw.lock
+
+    @property
+    def symbol(self) -> str:
+        return self._gw.broker_name(self.configured_symbol)
+
+    @property
+    def account_id(self) -> AccountId | None:
+        return self._gw.account_id
+
+    def account(self) -> Any:
+        return self._gw.account()
+
+    def verify_demo(self) -> None:
+        self._gw.verify_demo()
+
+    def symbol_info(self) -> Any:
+        return self._gw.symbol_info(self.symbol)
+
+    def tick(self) -> Any:
+        return self._gw.tick(self.symbol)
+
+    def rates(self, timeframe: int, start_pos: int, count: int):
+        return self._gw.rates(timeframe, start_pos, count, self.symbol)
+
+    def rates_range_server(self, timeframe: int, from_server_epoch: int, to_server_epoch: int):
+        return self._gw.rates_range_server(timeframe, from_server_epoch, to_server_epoch, self.symbol)
+
+    def bot_positions(self) -> list[Any]:
+        return self._gw.bot_positions(self.symbol)
+
+    def bot_orders(self) -> list[Any]:
+        return self._gw.bot_orders(self.symbol)
+
+    def bot_deals(self, from_server_epoch: int, to_server_epoch: int) -> list[Any]:
+        return self._gw.bot_deals(from_server_epoch, to_server_epoch, self.symbol)
+
+    def position_deals(self, position_ticket: int) -> list[Any]:
+        return self._gw.position_deals(position_ticket)
+
+    def filling_candidates(self) -> list[int]:
+        return self._gw.filling_candidates(self.symbol)
+
+    def supports_specified_expiration(self) -> bool:
+        return self._gw.supports_specified_expiration(self.symbol)
+
+    def order_check(self, request: dict) -> Any:
+        return self._gw.order_check(request)
+
+    def order_send(self, request: dict, gate: Callable[[], str | None] | None = None) -> Any:
+        return self._gw.order_send(request, gate, self.symbol)
+
+    def retcode_name(self, code: int) -> str:
+        return self._gw.retcode_name(code)
 
 
 def record(rec: Any) -> dict:

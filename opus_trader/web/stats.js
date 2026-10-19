@@ -110,6 +110,7 @@
       renderBars($("#bars-setup"), s.by_setup);
       renderBars($("#bars-conf"), s.by_confidence.map((x) => ({ ...x, label: x.label === "—" ? "Not given" : `${x.label} of 5` })));
       renderBars($("#bars-session"), s.by_session);
+      renderBars($("#bars-pair"), s.by_symbol || []);
     } catch (e) {
       $("#metrics tbody").innerHTML = `<tr><td colspan="3" class="muted">Couldn't load stats: ${fmt.esc(e.message)}</td></tr>`;
     }

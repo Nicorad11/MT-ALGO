@@ -70,18 +70,20 @@ class NewsCalendar:
         self.source = source
         self.currencies = {c.upper() for c in currencies}
 
-    def high_impact(self) -> list[Event]:
-        return [e for e in self.source.events() if e.impact == "high" and e.currency in self.currencies]
+    def high_impact(self, currencies: tuple[str, ...] | list[str] | None = None) -> list[Event]:
+        """High-impact events in the configured currencies; `currencies` narrows it to one pair's (EURUSD -> EUR, USD)."""
+        want = self.currencies if currencies is None else self.currencies & {c.upper() for c in currencies}
+        return [e for e in self.source.events() if e.impact == "high" and e.currency in want]
 
-    def upcoming(self, now: datetime, hours: float = 4) -> list[Event]:
+    def upcoming(self, now: datetime, hours: float = 4, currencies=None) -> list[Event]:
         end = now + timedelta(hours=hours)
-        return [e for e in self.high_impact() if now <= e.time <= end]
+        return [e for e in self.high_impact(currencies) if now <= e.time <= end]
 
-    def next_event(self, now: datetime) -> Event | None:
-        return next((e for e in self.high_impact() if e.time >= now), None)
+    def next_event(self, now: datetime, currencies=None) -> Event | None:
+        return next((e for e in self.high_impact(currencies) if e.time >= now), None)
 
-    def blackout(self, now: datetime, before_min: int, after_min: int) -> Event | None:
-        for e in self.high_impact():
+    def blackout(self, now: datetime, before_min: int, after_min: int, currencies=None) -> Event | None:
+        for e in self.high_impact(currencies):
             if e.time - timedelta(minutes=before_min) <= now <= e.time + timedelta(minutes=after_min):
                 return e
         return None

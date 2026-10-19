@@ -104,6 +104,6 @@ def test_engine_on_a_warsaw_clock_broker(tmp_path):
         env.advance(15)
         d = env.decision(env.bar())
         assert d["status"] == "CALLED" and d["bar_time"] == "2026-10-14 10:00"
-        assert "Decide for the M15 bar that closed at 2026-10-14 10:15 UTC" in d["prompt_text"]
+        assert "Decide on EURUSD for the M15 bar that closed at 2026-10-14 10:15 UTC" in d["prompt_text"]
     finally:
         env.close()

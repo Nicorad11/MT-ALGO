@@ -29,14 +29,14 @@ _NULLABLE_NUMBER = {"anyOf": [{"type": "number"}, {"type": "null"}]}
 
 TOOL: dict = {
     "name": "submit_decision",
-    "description": "Submit your decision for the M15 bar that just closed. Call this exactly once per bar.",
+    "description": "Submit your decision on this pair for the M15 bar that just closed. Call this exactly once.",
     "strict": True,
     "input_schema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "action": {"type": "string", "enum": ["OPEN_LONG", "OPEN_SHORT", "HOLD", "CLOSE", "MOVE_STOP"],
-                       "description": "CLOSE closes the open position or cancels the pending order. MOVE_STOP can only tighten the stop."},
+                       "description": "CLOSE closes this pair's open position or cancels its pending order. MOVE_STOP can only tighten the stop."},
             "order_type": {"anyOf": [{"type": "string", "enum": ["MARKET", "LIMIT"]}, {"type": "null"}],
                            "description": "MARKET or LIMIT for OPEN_LONG / OPEN_SHORT; null otherwise."},
             "entry": {**_NULLABLE_NUMBER, "description": "Limit price for LIMIT orders; null otherwise."},
@@ -59,33 +59,35 @@ def system_prompt(cfg: Config) -> str:
                     f"{sig.filter_bars} closed bars. HOLD, CLOSE and MOVE_STOP are always allowed.")
     else:
         mode_txt = "Treat it as one input among many. You may use it or ignore it."
-    return f"""You are an experienced discretionary EUR/USD trader running a small, disciplined book on a MetaTrader 5 demo account. Each time an M15 candle closes you receive a snapshot of the market and of your book, and you make one decision.
+    return f"""You are an experienced discretionary forex trader running a small, disciplined book across the major pairs on a MetaTrader 5 demo account. Each time an M15 candle closes, every pair is reviewed separately: you receive a snapshot of one pair and of the whole book, and you make one decision for that pair. The other pairs are decided in their own calls.
 
 How you trade
 - HOLD is the default. No trade beats a weak trade. Act only when the setup is clear, the location is good, and the reward clearly outweighs the risk.
 - Read the timeframes together: H4 and H1 for context and levels, M15 for timing.
-- Stay consistent with your recent reasoning unless something has actually changed, and say what changed when you change your view.
+- Stay consistent with your recent reasoning on the pair unless something has actually changed, and say what changed when you change your view.
 - Put the stop where the trade idea is proven wrong and the target at a level price can realistically reach.
+- Think about the book as a whole: trades on different pairs that share a currency are largely the same bet.
 
-Risk rules (enforced by a separate risk engine; an order that breaks one is rejected, and you see the rejection on the next bar)
+Risk rules (enforced by a separate risk engine; an order that breaks one is rejected, and you see the rejection on the pair's next bar)
 - Risk per trade is {r.risk_per_trade_pct:.2f}% of equity. The engine sizes the position from your stop distance; you never choose the lot size.
-- At most one open position or pending order at a time.
+- At most one open position or pending order per pair, and at most {r.max_open_trades} across all pairs.
+- Currency exposure: at most {r.max_currency_exposure} net trade{'s' if r.max_currency_exposure != 1 else ''} in one direction of any currency. Long EURUSD and long GBPUSD are both short USD, so together they count 2; trades in opposite directions cancel out. The snapshot says which directions are still allowed.
 - Stop distance between {r.min_stop_atr:g}× and {r.max_stop_atr:g}× ATR(14) on M15.
 - Reward:risk of at least {r.min_reward_risk:g}: take-profit distance divided by stop distance, measured from the executable price (the ask for longs, the bid for shorts, or your limit price).
-- Spread at most {r.max_spread_pips:g} pips. At most {r.max_trades_per_day} entries per trading day; the trading day rolls over at 17:00 New York. After a losing trade, no new entry for {r.cooldown_bars_after_loss} bars.
-- Daily loss limit {r.daily_loss_limit_pct:g}% of start-of-day equity: when it is hit the book is closed and trading halts until 17:00 New York.
+- Spread at most {r.max_spread_pips:g} pips. At most {r.max_trades_per_day} entries per trading day across all pairs; the trading day rolls over at 17:00 New York. After a losing trade on a pair, no new entry on that pair for {r.cooldown_bars_after_loss} bars.
+- Daily loss limit {r.daily_loss_limit_pct:g}% of start-of-day equity, all pairs together: when it is hit the whole book is closed and trading halts until 17:00 New York.
 - MOVE_STOP only tightens the stop, never loosens it, and leaves the take-profit unchanged.
-- No new entries after Friday {s.friday_no_entries_utc} UTC; open positions are closed at Friday {s.friday_flat_utc} UTC. You are not asked for decisions around high-impact news.
+- No new entries after Friday {s.friday_no_entries_utc} UTC; open positions are closed at Friday {s.friday_flat_utc} UTC. You are not asked about a pair around high-impact news for its currencies.
 - Limit orders expire after {r.limit_expiry_bars} bars.
 
 The Trend Signals indicator
 The snapshot includes an ATR trailing-stop trend indicator computed on closed M15 bars. In an uptrend a line sits {sig.multiplier:g}× ATR({sig.atr_length}) below the bar's midpoint and only moves up; in a downtrend it sits above and only moves down. The trend flips when a close crosses the previous bar's line. It is strong in sustained trends and prone to whipsaws in ranges. Its line is offered as a natural stop with 1R, 2R and 3R targets, and its last flips are listed with how the indicator alone would have done. {mode_txt}
 
 Your answer
-Call the submit_decision tool exactly once, with:
-- action: OPEN_LONG, OPEN_SHORT, HOLD, CLOSE (closes the open position or cancels the pending order) or MOVE_STOP.
+Call the submit_decision tool exactly once, for the pair in the snapshot, with:
+- action: OPEN_LONG, OPEN_SHORT, HOLD, CLOSE (closes this pair's open position or cancels its pending order) or MOVE_STOP.
 - order_type: MARKET or LIMIT for entries, null otherwise. entry: the limit price for LIMIT orders, null otherwise.
-- stop_loss and take_profit: absolute prices with 5 decimals for entries. For MOVE_STOP, stop_loss is the new stop. Null when they don't apply.
+- stop_loss and take_profit: absolute prices with the pair's decimals for entries. For MOVE_STOP, stop_loss is the new stop. Null when they don't apply.
 - confidence: 1 (marginal) to 5 (exceptional). For HOLD, how sure you are that standing aside is right.
 - setup: a short label for the pattern, such as "Asian range breakout" or "H1 pullback to EMA20". For HOLD, what you are waiting for.
 - reasoning: at most about 150 words. What you see, why this action, and what would change your mind.
@@ -93,7 +95,8 @@ Call the submit_decision tool exactly once, with:
 
 Reading the snapshot
 - Candles are CSV in UTC, oldest first, and the time is the bar's open time. Every candle is closed; the bar still forming is never included.
-- Prices are bid prices with 5 decimals. A pip is 0.0001. ATR values are given in pips."""
+- Prices are bid prices. Most pairs quote 5 decimals and a pip is 0.0001; JPY pairs quote 3 decimals and a pip is 0.01. The snapshot states both for the pair. ATR values are given in pips.
+- Account figures (balance, equity, today's P&L, entries today) cover all pairs; positions, trades and decisions are listed per pair."""
 
 
 def thinking_summary(response: dict | None) -> str | None:
@@ -250,7 +253,7 @@ class OpusClient:
         except Exception as exc:  # noqa: BLE001 - e.g. ANTHROPIC_PROFILE names a profile that doesn't exist
             self.key_problem = f"Anthropic credentials could not be loaded ({exc})"
 
-    async def decide(self, request: dict, cfg: Config) -> LLMResult:
+    async def decide(self, request: dict, cfg: Config, context: dict | None = None) -> LLMResult:
         a = self._anthropic
         t0 = time.monotonic()
         if getattr(self, "key_problem", None):
@@ -329,8 +332,10 @@ class FakeLLM:
         self.snapshot_provider = None  # set by the engine in --sim: () -> snapshot data dict
         self.force_next: str | None = None  # --sim preview controls: long | short | reject | hold
 
-    async def decide(self, request: dict, cfg: Config) -> LLMResult:
+    async def decide(self, request: dict, cfg: Config, context: dict | None = None) -> LLMResult:
+        """`context` is the snapshot data of the pair being decided (the engine passes it; the real client ignores it)."""
         self.calls.append(request)
+        snap = context if context is not None else (self.snapshot_provider() if self.snapshot_provider else {})
         lo, hi = self.latency_s
         delay = self.rng.uniform(lo, hi) if hi > 0 else 0.0
         if delay:
@@ -343,7 +348,7 @@ class FakeLLM:
             else:
                 item = self.script.pop(0)
             if callable(item):
-                item = item(self.snapshot_provider() if self.snapshot_provider else {})
+                item = item(snap)
             if isinstance(item, Exception):
                 raise item
             if item == "timeout":
@@ -355,7 +360,7 @@ class FakeLLM:
             if item == "no_tool":
                 return parse_response(fake_response(None, "end_turn"), cfg, latency)
             return parse_response(fake_response(item), cfg, latency)
-        data = self.snapshot_provider() if self.snapshot_provider else {}
+        data = snap
         forced, self.force_next = self.force_next, None
         decision = self._forced(forced, data) if forced else self._rule_based(data)
         thinking = ("Simulated summary of the model's thinking. The real Opus summary appears here: how it read H4 and H1, "
@@ -394,6 +399,7 @@ class FakeLLM:
         pip = d.get("pip", 0.0001)
         bid, ask = mkt.get("bid"), mkt.get("ask")
         rng = self.rng
+        digits = d.get("digits", 5)
         if pos:
             line = sig.get("line")
             against = (pos["side"] == "long" and sig.get("trend") == "down") or (pos["side"] == "short" and sig.get("trend") == "up")
@@ -403,13 +409,19 @@ class FakeLLM:
                         "invalidation": "A close back through the line would have kept the trade valid."}
             if line and ((pos["side"] == "long" and line > (pos.get("sl") or 0) + 2 * pip) or (pos["side"] == "short" and line < (pos.get("sl") or 9) - 2 * pip)) and rng.random() < 0.5:
                 return {**hold, "action": "MOVE_STOP", "stop_loss": round(line, 5), "confidence": 3, "setup": "Trail to signal line",
-                        "reasoning": f"Price has moved in favour; trailing the stop to the indicator line at {line:.5f} locks in part of the move while leaving room for the trend.",
+                        "reasoning": f"Price has moved in favour; trailing the stop to the indicator line at {line:.{digits}f} locks in part of the move while leaving room for the trend.",
                         "invalidation": "A close beyond the new stop."}
             return {**hold, "confidence": 3, "setup": "Managing position",
                     "reasoning": f"The {pos['side']} is working; structure intact and RSI {rsi} is not stretched. Leaving the stop and target where they are.",
                     "invalidation": "A close beyond the signal line."}
         if sig.get("flipped_now") and bid and ask:
             side = "long" if sig.get("flip_now") == "BUY" else "short"
+            rs = d.get("risk_state") or {}
+            block = "; ".join(rs.get("blocked") or []) if not rs.get("entries_allowed", True) else rs.get(f"{side}_blocked")
+            if block and rng.random() < 0.85:  # a real trader reads the risk state; now and then the stand-in doesn't, so rejections show up too
+                return {**hold, "confidence": 3, "setup": "Blocked by the book",
+                        "reasoning": f"The indicator flipped {sig.get('flip_now')}, but a {side} isn't possible right now: {block[0].lower() + block[1:]}. Standing aside.",
+                        "invalidation": "Room in the book for this trade."}
             line = sig["line"]
             entry = ask if side == "long" else bid
             dist = abs(entry - line)
@@ -425,8 +437,8 @@ class FakeLLM:
                     "stop_loss": round(stop, 5), "take_profit": round(tp, 5), "confidence": rng.choice([3, 3, 4, 4, 5]), "setup": setup,
                     "reasoning": (f"The indicator just flipped {sig.get('flip_now')} and price is {cloud} the cloud. "
                                   f"H1 structure supports a {side}, RSI {rsi} leaves room, and the signal line gives a clean stop "
-                                  f"{dist / pip:.1f} pips away. Targeting 2R at {tp:.5f}."),
-                    "invalidation": f"A close back through {line:.5f}."}
+                                  f"{dist / pip:.1f} pips away. Targeting 2R at {tp:.{digits}f}."),
+                    "invalidation": f"A close back through {line:.{digits}f}."}
         reason = rng.choice([
             f"No clear edge. Price is chopping around the M15 EMAs with RSI {rsi}; waiting for a decisive break.",
             f"Trend is {sig.get('trend', 'unclear')} but price is extended from the signal line; a pullback would offer a better entry.",

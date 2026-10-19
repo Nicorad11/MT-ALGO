@@ -1,4 +1,4 @@
-/* Live screen: KPIs, M15 chart, latest call, recent decisions, status footer. */
+/* Live screen: KPIs, M15 chart of the selected pair, its latest call, the pair board, status footer. */
 (() => {
   "use strict";
   const { $, $$, fmt, api } = window.Opus;
@@ -11,6 +11,8 @@
   let lastCandles = null;
   let thinkingSince = null;
   let candleTimer = null;
+  let chartDigits = 5;
+  let chartPair = null;
 
   // ------------------------------------------------------------ chart
   function chartOptions() {
@@ -22,7 +24,7 @@
       rightPriceScale: { borderColor: c("--border") },
       timeScale: { borderColor: c("--border"), timeVisible: true, secondsVisible: false, rightOffset: 4 },
       crosshair: { mode: LC.CrosshairMode.Normal, vertLine: { color: c("--muted"), labelBackgroundColor: c("--border") }, horzLine: { color: c("--muted"), labelBackgroundColor: c("--border") } },
-      localization: { priceFormatter: (p) => p.toFixed(5) },
+      localization: { priceFormatter: (p) => p.toFixed(chartDigits) },
     };
   }
 
@@ -52,7 +54,8 @@
     if (!param || !param.time || mode !== "price") { box.textContent = ""; return; }
     const d = param.seriesData.get(candles);
     if (!d) { box.textContent = ""; return; }
-    box.textContent = `O ${d.open.toFixed(5)}  H ${d.high.toFixed(5)}  L ${d.low.toFixed(5)}  C ${d.close.toFixed(5)}`;
+    const n = chartDigits;
+    box.textContent = `O ${d.open.toFixed(n)}  H ${d.high.toFixed(n)}  L ${d.low.toFixed(n)}  C ${d.close.toFixed(n)}`;
   }
 
   function restyle() {
@@ -96,10 +99,10 @@
   }
 
   function updateBid() {
-    if (!candles) return;
-    const s = Opus.status;
-    if (!s || s.bid == null) return;
-    const opts = { price: s.bid, color: Opus.css("--muted"), lineWidth: 1, lineStyle: LC.LineStyle.Dotted, axisLabelVisible: true, title: "Bid" };
+    if (!candles || mode !== "price" || chartPair !== Opus.pair) return;
+    const p = Opus.pairInfo(Opus.pair);
+    if (!p || p.bid == null) return;
+    const opts = { price: p.bid, color: Opus.css("--muted"), lineWidth: 1, lineStyle: LC.LineStyle.Dotted, axisLabelVisible: true, title: "Bid" };
     if (bidLine) bidLine.applyOptions(opts);
     else bidLine = candles.createPriceLine(opts);
   }
@@ -107,10 +110,21 @@
   async function loadCandles() {
     ensureChart();
     if (mode !== "price") return;
+    const pair = Opus.pair;
     try {
-      const data = await api("/api/candles?bars=192");
+      const data = await api(`/api/candles?bars=192${pair ? `&symbol=${encodeURIComponent(pair)}` : ""}`);
+      if (pair !== Opus.pair) return;  // the pair was switched while this loaded
       $("#live-chart-empty").hidden = true;
-      const first = !lastCandles;
+      const first = !lastCandles || chartPair !== data.symbol;
+      if (chartDigits !== data.digits) {
+        chartDigits = data.digits;
+        const minMove = Math.pow(10, -chartDigits);
+        candles.applyOptions({ priceFormat: { type: "price", precision: chartDigits, minMove } });
+        emaSeries.forEach((x) => x.applyOptions({ priceFormat: { type: "price", precision: chartDigits, minMove } }));
+        chart.applyOptions({ localization: { priceFormatter: (v) => v.toFixed(chartDigits) } });
+      }
+      if (chartPair !== data.symbol && bidLine) { candles.removePriceLine(bidLine); bidLine = null; }
+      chartPair = data.symbol;
       lastCandles = data;
       candles.setData(data.candles);
       emaSeries[0].setData(data.ema20);
@@ -120,7 +134,7 @@
       if (first) chart.timeScale().fitContent();
     } catch (e) {
       $("#live-chart-empty").hidden = false;
-      $("#live-chart-empty").textContent = e.status === 503 ? "Waiting for MT5…" : `Chart unavailable: ${e.message}`;
+      $("#live-chart-empty").textContent = e.status === 503 ? "Waiting for MT5…" : e.status === 404 ? "This pair isn't traded right now." : `Chart unavailable: ${e.message}`;
     }
   }
 
@@ -150,6 +164,7 @@
     equityLine.applyOptions({ visible: !price });
     markersApi.setMarkers(price && lastCandles ? markersApi.markers() : []);
     $("#toggle-emas").closest("label").hidden = !price;
+    renderPairSelect();
     $("#ema-legend").hidden = !showEma;
     candles.priceScale().applyOptions({ autoScale: true });
     if (price) { loadCandles(); } else { loadEquity(); }
@@ -174,20 +189,34 @@
     pct.textContent = k.today_pct == null ? "" : fmt.pct(k.today_pct);
     pct.className = `kpi-sub num ${fmt.cls(k.today_pct)}`;
 
-    const p = st.position;
+    const list = st.positions || [];
     const pv = $("#kpi-position"), ps = $("#kpi-position-sub");
-    if (!p) {
+    const max = st.max_open_trades;
+    if (!list.length) {
       pv.innerHTML = '<span class="muted">Flat</span>';
-      ps.textContent = "";
-    } else if (p.kind === "pending") {
-      pv.innerHTML = `<span class="${p.side === "long" ? "up" : "down"}">${p.side === "long" ? "▲ Buy limit" : "▼ Sell limit"}</span> <span class="num">${fmt.num(p.volume, 2)}</span> lots`;
-      ps.innerHTML = `@ ${fmt.price(p.entry)} · expires ${fmt.esc(fmt.hm(p.expires))} UTC`;
-      ps.className = "kpi-sub num muted";
+      ps.textContent = max ? `Up to ${max} at once, one per pair` : "";
+      ps.className = "kpi-sub muted";
+    } else if (list.length === 1) {
+      const p = list[0];
+      const word = p.kind === "pending" ? (p.side === "long" ? "▲ Buy limit" : "▼ Sell limit") : (p.side === "long" ? "▲ Long" : "▼ Short");
+      pv.innerHTML = `<span class="${p.side === "long" ? "up" : "down"}">${word}</span> ${fmt.esc(p.symbol)} <span class="num">${fmt.num(p.volume, 2)}</span> lots`;
+      if (p.kind === "pending") {
+        ps.innerHTML = `@ ${fmt.price(p.entry, p.digits)} · expires ${fmt.esc(fmt.hm(p.expires))} UTC`;
+        ps.className = "kpi-sub num muted";
+      } else {
+        const r = p.r == null ? "" : ` · <span class="${fmt.cls(p.r)}">${fmt.r(p.r)}</span>`;
+        const u = p.unrealized == null ? "" : ` · <span class="${fmt.cls(p.unrealized)}">${fmt.money(p.unrealized, cur, true)}</span>`;
+        ps.innerHTML = `@ ${fmt.price(p.entry, p.digits)}${r}${u}`;
+        ps.className = "kpi-sub num";
+      }
     } else {
-      pv.innerHTML = `<span class="${p.side === "long" ? "up" : "down"}">${p.side === "long" ? "▲ Long" : "▼ Short"}</span> <span class="num">${fmt.num(p.volume, 2)}</span> lots`;
-      const r = p.r == null ? "" : ` · <span class="${fmt.cls(p.r)}">${fmt.r(p.r)}</span>`;
-      const u = p.unrealized == null ? "" : ` · <span class="${fmt.cls(p.unrealized)}">${fmt.money(p.unrealized, cur, true)}</span>`;
-      ps.innerHTML = `@ ${fmt.price(p.entry)}${r}${u}`;
+      const unreal = list.reduce((a, p) => a + (p.unrealized || 0), 0);
+      pv.innerHTML = `<span class="num">${list.length}</span>${max ? ` <span class="muted">of ${max}</span>` : ""} · <span class="num ${fmt.cls(unreal)}">${fmt.money(unreal, cur, true)}</span>`;
+      ps.innerHTML = `<span class="pos-list">${list.map((p) => {
+        const arrow = p.side === "long" ? '<span class="up">▲</span>' : '<span class="down">▼</span>';
+        const res = p.kind === "pending" ? '<span class="muted">limit</span>' : `<span class="${fmt.cls(p.r)}">${fmt.r(p.r)}</span>`;
+        return `<span>${arrow} ${fmt.esc(p.symbol)} ${res}</span>`;
+      }).join("")}</span>`;
       ps.className = "kpi-sub num";
     }
     $("#kpi-dd").textContent = fmt.pct(k.max_dd_pct, true);
@@ -200,6 +229,7 @@
     $("#latest-body").hidden = !has;
     $("#latest-empty").hidden = has;
     if (!has) {
+      $("#latest-pair").innerHTML = Opus.pair ? `<span class="pair-chip">${fmt.esc(Opus.pair)}</span>` : "";
       const s = st.status || {};
       const secs = s.next_bar_at ? (Date.parse(s.next_bar_at) - Opus.serverNow()) / 1000 : null;
       $("#latest-empty").textContent = secs != null
@@ -210,6 +240,7 @@
       return;
     }
     $("#latest-time").textContent = `${fmt.hm(barClose(d.bar_time))} UTC`;
+    $("#latest-pair").innerHTML = d.symbol ? `<span class="pair-chip">${fmt.esc(Opus.pairName(d.symbol))}</span>` : "";
     const word = $("#latest-action");
     const kind = { OPEN_LONG: ["LONG ▲", "long"], OPEN_SHORT: ["SHORT ▼", "short"], CLOSE: ["CLOSE", ""], MOVE_STOP: ["MOVE STOP", ""] }[d.action] || ["HOLD", "hold"];
     word.textContent = kind[0];
@@ -249,17 +280,37 @@
     return d ? new Date(d.getTime() + 15 * 60 * 1000).toISOString() : null;
   }
 
-  function renderRecent(st) {
-    const list = $("#recent-list");
-    const items = st.recent || [];
-    if (!items.length) {
-      list.innerHTML = '<li class="muted" style="cursor:default;display:block">Decisions appear here after each closed bar.</li>';
+  function renderBoard(st) {
+    const list = $("#pair-board");
+    const rows = st.board || [];
+    if (!rows.length) {
+      list.innerHTML = '<li class="muted" style="cursor:default;display:block">Pairs appear here once MT5 is connected.</li>';
       return;
     }
-    list.innerHTML = items.map((d) => {
-      const a = Opus.actionLabel(d);
-      return `<li data-id="${d.id}" tabindex="0" title="Open in Journal"><span class="t num">${fmt.hm(barClose(d.bar_time))}</span><span class="a ${a.cls}">${a.text}</span><span class="s">${fmt.esc(d.summary || "")}</span></li>`;
+    const open = {};
+    for (const p of st.positions || []) open[p.symbol] = p;
+    const thinking = new Set((Opus.status && Opus.status.thinking) || []);
+    list.innerHTML = rows.map((row) => {
+      const d = row.latest;
+      const a = thinking.has(row.symbol) ? { text: "…", cls: "act-skip" } : Opus.actionLabel(d);
+      const summary = thinking.has(row.symbol) ? "Opus is thinking" : d ? d.summary || "" : "No decision yet";
+      const p = open[row.symbol];
+      const pos = !p ? "" : p.kind === "pending"
+        ? `<span class="o muted">${p.side === "long" ? "▲" : "▼"} limit</span>`
+        : `<span class="o"><span class="${p.side === "long" ? "up" : "down"}">${p.side === "long" ? "▲" : "▼"}</span> <span class="num ${fmt.cls(p.r)}">${fmt.r(p.r)}</span></span>`;
+      const cur = row.symbol === Opus.pair ? ' aria-current="true"' : "";
+      return `<li data-pair="${fmt.esc(row.symbol)}" tabindex="0"${cur} title="Show ${fmt.esc(row.symbol)} on the chart"><span class="p">${fmt.esc(row.symbol)}</span>` +
+        `<span class="a ${a.cls}">${a.text}</span><span class="s">${fmt.esc(summary)}</span>${pos || "<span></span>"}</li>`;
     }).join("");
+  }
+
+  function renderPairSelect() {
+    const sel = $("#chart-pair");
+    const pairs = Opus.pairs();
+    const html = pairs.map((p) => `<option value="${fmt.esc(p)}"${p === Opus.pair ? " selected" : ""}>${fmt.esc(p)}</option>`).join("");
+    if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; }
+    if (Opus.pair && sel.value !== Opus.pair) sel.value = Opus.pair;
+    sel.hidden = !pairs.length || mode !== "price";
   }
 
   function renderFooter() {
@@ -271,8 +322,11 @@
     conn.className = ok ? "ok" : "bad";
     conn.innerHTML = `<span class="dot" aria-hidden="true"></span>${ok ? "MT5 connected" : s.connected ? "MT5: no broker connection" : "MT5 disconnected"}`;
     const sp = $("#foot-spread");
-    sp.textContent = s.spread_pips == null ? "Spread —" : `Spread ${fmt.pips(s.spread_pips)}`;
-    sp.className = "num" + (s.spread_pips != null && Opus.maxSpread && s.spread_pips > Opus.maxSpread ? " warn" : "");
+    const pi = Opus.pairInfo(Opus.pair);
+    const spread = pi ? pi.spread_pips : s.spread_pips;
+    const name = pi ? `${pi.symbol} spread` : "Spread";
+    sp.textContent = spread == null ? `${name} —` : `${name} ${fmt.pips(spread)}`;
+    sp.className = "num" + (spread != null && Opus.maxSpread && spread > Opus.maxSpread ? " warn" : "");
     const ev = s.next_event;
     $("#foot-event").textContent = ev
       ? `${ev.currency} ${ev.title} in ${fmt.duration((Date.parse(ev.time) - Opus.serverNow()) / 1000)} (${fmt.hm(ev.time)} UTC)`
@@ -285,6 +339,9 @@
     const since = s && s.thinking_since;
     thinkingSince = since ? Date.parse(since) : null;
     $("#latest-thinking").hidden = !since;
+    const who = (s && s.thinking) || [];
+    $("#thinking-what").textContent = who.length > 1 ? `Opus is thinking about ${who.length} pairs (${who.join(", ")})…`
+      : who.length ? `Opus is thinking about ${who[0]}…` : "Opus is thinking…";
     if (since) {
       $("#latest-body").hidden = !(Opus.state && Opus.state.latest);
       $("#latest-empty").hidden = true;
@@ -305,14 +362,19 @@
         const clamped = r.classList.toggle("clamp");
         $("#latest-more").textContent = clamped ? "Show more" : "Show less";
       });
-      $("#recent-list").addEventListener("click", (e) => {
-        const li = e.target.closest("li[data-id]");
-        if (li) Opus.go(`#/journal/${li.dataset.id}`);
+      $("#pair-board").addEventListener("click", (e) => {
+        const li = e.target.closest("li[data-pair]");
+        if (li) Opus.setPair(li.dataset.pair);
       });
-      $("#recent-list").addEventListener("keydown", (e) => {
-        const li = e.target.closest("li[data-id]");
-        if (li && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); Opus.go(`#/journal/${li.dataset.id}`); }
+      $("#pair-board").addEventListener("keydown", (e) => {
+        const li = e.target.closest("li[data-pair]");
+        if (li && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); Opus.setPair(li.dataset.pair); }
       });
+      $("#chart-pair").addEventListener("change", (e) => Opus.setPair(e.target.value));
+      $("#latest-card").addEventListener("click", (e) => {
+        if (e.target.closest("#latest-time") && Opus.state && Opus.state.latest) Opus.go(`#/journal/${Opus.state.latest.id}`);
+      });
+      Opus.on("pair", () => { renderPairSelect(); renderFooter(); if (Opus.view === "live" && mode === "price") loadCandles(); });
       const tb = $(".chart-toolbar");
       const ohlc = document.createElement("span");
       ohlc.id = "ohlc";
@@ -320,10 +382,12 @@
       ohlc.style.fontSize = "12px";
       tb.appendChild(ohlc);
 
-      Opus.on("state", (st) => { renderKpis(st); renderLatest(st); renderRecent(st); renderFooter(); renderThinking(); });
-      Opus.on("status", () => { renderFooter(); renderThinking(); updateBid(); });
+      Opus.on("state", (st) => { renderKpis(st); renderLatest(st); renderBoard(st); renderPairSelect(); renderFooter(); renderThinking(); });
+      Opus.on("status", () => { renderFooter(); renderThinking(); renderPairSelect(); updateBid(); });
       Opus.on("tick", () => { updateThinkingClock(); if (!(Opus.state && Opus.state.latest) && Opus.state) renderLatest(Opus.state); });
       Opus.on("thinking", () => Opus.refreshState());
+      $("#latest-time").dataset.tip = "Open this call in the Journal";
+      $("#latest-time").style.cursor = "pointer";
       Opus.on("decision", () => { if (Opus.view === "live") (mode === "price" ? loadCandles() : loadEquity()); });
       Opus.on("trade", () => { if (Opus.view === "live") (mode === "price" ? loadCandles() : loadEquity()); });
       Opus.on("theme", restyle);

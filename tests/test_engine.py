@@ -22,7 +22,7 @@ def test_full_dry_run_cycle(tmp_path):
         d = env.decision(did)
         assert d["status"] == "CALLED" and d["action"] == "OPEN_LONG" and d["verdict"] == "APPROVED", d["verdict_reason"]
         assert d["mode"] == "dry" and d["bar_time"] == "2026-10-14 09:45"
-        assert d["prompt_text"].startswith("## H4 candles") and "Decide for the M15 bar that closed at 2026-10-14 10:00 UTC" in d["prompt_text"]
+        assert d["prompt_text"].startswith("# EURUSD\n\n## EURUSD H4 candles") and "Decide on EURUSD for the M15 bar that closed at 2026-10-14 10:00 UTC" in d["prompt_text"]
         assert json.loads(d["snapshot_json"])["signal"]["trend"] in ("up", "down")
         assert d["signal_agreement"] in ("agree", "disagree")
         assert d["cost_usd"] > 0 and d["input_tokens"] > 0
@@ -83,8 +83,7 @@ def test_model_failure_is_hold(tmp_path, failure):
 def test_one_bad_bar_does_not_stop_the_next(tmp_path):
     env = Env(tmp_path, script=[RuntimeError("boom"), HOLD])
     try:
-        assert env.bar() is None
-        err = env.store.one("SELECT * FROM decisions ORDER BY id DESC LIMIT 1")
+        err = env.decision(env.bar())  # the failing pair is recorded as an error and treated as HOLD
         assert err["verdict"] == "ERROR" and "boom" in err["verdict_reason"]
         assert env.store.one("SELECT * FROM engine_events WHERE kind='bar_error'")
         env.advance(15)
@@ -269,7 +268,8 @@ def test_missing_api_key_warns_from_the_start(tmp_path):
 
 
 def test_absurd_spread_gets_a_banner(env):
-    env.engine.rt.bid, env.engine.rt.ask = 1.12105, 1.14505  # 240 pips
-    assert any("spread is 240.0 pips" in b["text"] for b in env.engine.banners())
-    env.engine.rt.bid, env.engine.rt.ask = 1.12105, 1.12129  # 2.4 pips: skipped by the pre-check, but no banner
-    assert not any("spread is" in b["text"] for b in env.engine.banners())
+    book = env.engine.books["EURUSD"]
+    book.bid, book.ask = 1.12105, 1.14505  # 240 pips
+    assert any("EURUSD 240.0 pips" in b["text"] for b in env.engine.banners())
+    book.bid, book.ask = 1.12105, 1.12129  # 2.4 pips: skipped by the pre-check, but no banner
+    assert not any("wide spread" in b["text"] for b in env.engine.banners())

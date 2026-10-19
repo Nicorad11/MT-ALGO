@@ -18,6 +18,28 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_SYMBOL = re.compile(r"^[A-Za-z0-9._#+-]{3,24}$")
+
+# The seven major pairs the bot trades by default; Settings shows these as on/off switches.
+MAJORS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
+CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "CAD", "NZD"]
+
+
+def pair_currencies(symbol: str) -> tuple[str, str]:
+    """(base, quote) from a forex symbol name: EURUSD.pro -> (EUR, USD)."""
+    core = symbol.upper()[:6]
+    return core[:3], core[3:6]
+
+
+def migrate_symbol(old: str) -> list[str]:
+    """The pair list for a config written when the bot traded one symbol (app.symbol).
+
+    The old symbol keeps its exact name (a broker variant like EURUSD.pro stays) and the other majors are added."""
+    old = str(old).strip()
+    core = old.upper()[:6]
+    if core in MAJORS:
+        return [old if m == core else m for m in MAJORS]
+    return [old] + MAJORS
 
 
 def ui(label: str, unit: str = "", tip: str = "", editable: bool = True, step: float | None = None) -> dict:
@@ -37,9 +59,14 @@ class RiskConfig(_Section):
         2.0, ge=0.5, le=5.0, description="Bot loss (realized + open) that halts trading until 17:00 New York, in percent of start-of-day equity.",
         json_schema_extra=ui("Daily loss limit", "%", "When the bot's losses today reach this share of start-of-day equity, it goes flat and halts until 17:00 New York.", step=0.1),
     )
-    max_open_positions: int = Field(
-        1, ge=1, le=1, description="Maximum open bot positions (fixed at 1).",
-        json_schema_extra=ui("Max open positions", "", editable=False),
+    max_open_trades: int = Field(
+        3, ge=1, le=7, description="Maximum bot positions plus pending orders open at once, across all pairs (one per pair).",
+        json_schema_extra=ui("Max open trades", "", "Positions plus pending limit orders across all pairs. Each pair holds at most one."),
+    )
+    max_currency_exposure: int = Field(
+        1, ge=1, le=3, description="Maximum net trades in one direction of one currency. Long EURUSD and long GBPUSD are both short USD: that is 2.",
+        json_schema_extra=ui("Max trades per currency", "", "Long EURUSD and long GBPUSD are both short USD, so together they count 2 for USD. "
+                             "Opposite directions cancel out. Stops the bot doubling up on one currency."),
     )
     max_trades_per_day: int = Field(
         6, ge=1, le=20, description="Maximum new entries per trading day (17:00 to 17:00 New York).",
@@ -59,7 +86,7 @@ class RiskConfig(_Section):
     )
     max_spread_pips: float = Field(
         1.5, ge=0.5, le=5.0, description="Skip the bar when the spread is wider than this, in pips.",
-        json_schema_extra=ui("Max spread", "pips", "A pip is 0.0001 on EUR/USD.", step=0.1),
+        json_schema_extra=ui("Max spread", "pips", "Checked per pair. A pip is 0.0001, or 0.01 on JPY pairs.", step=0.1),
     )
     cooldown_bars_after_loss: int = Field(
         2, ge=0, le=12, description="Bars to wait before a new entry after a losing trade.",
@@ -71,8 +98,15 @@ class RiskConfig(_Section):
     )
     deviation_points: int = Field(
         10, ge=0, le=100, description="Maximum slippage for market orders, in points (10 points = 1 pip).",
-        json_schema_extra=ui("Max slippage", "points", "10 points equal 1 pip on EUR/USD."),
+        json_schema_extra=ui("Max slippage", "points", "10 points equal 1 pip."),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_old_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_open_positions" in data:
+            data = {k: v for k, v in data.items() if k != "max_open_positions"}  # replaced by max_open_trades
+        return data
 
     @model_validator(mode="after")
     def _stop_range(self) -> "RiskConfig":
@@ -123,7 +157,7 @@ class NewsConfig(_Section):
         json_schema_extra=ui("Events file", editable=False),
     )
     currencies: list[str] = Field(
-        default_factory=lambda: ["USD", "EUR"], description="Currencies whose high-impact events trigger a blackout.",
+        default_factory=lambda: list(CURRENCIES), description="Currencies whose high-impact events trigger a blackout (for the pairs that contain them).",
         json_schema_extra=ui("Currencies", editable=False),
     )
 
@@ -160,6 +194,10 @@ class ModelConfig(_Section):
         "high", description="Reasoning effort per decision. Higher is more thorough and costs more.",
         json_schema_extra=ui("Effort", "", "How much reasoning Opus does per bar. Higher effort costs more."),
     )
+    max_concurrent_calls: int = Field(
+        3, ge=1, le=7, description="How many pairs Opus decides at the same time after each bar.",
+        json_schema_extra=ui("Parallel calls", "", "Pairs decided at the same time after each bar. More is faster; fewer is gentler on API rate limits."),
+    )
     timeout_s: int = Field(
         180, ge=30, le=600, description="Seconds to wait for a decision before treating the bar as HOLD.",
         json_schema_extra=ui("Timeout", "s"),
@@ -175,14 +213,50 @@ class ModelConfig(_Section):
 
 
 class AppConfig(_Section):
-    symbol: str = Field("EURUSD", description="Symbol to trade.", json_schema_extra=ui("Symbol", editable=False))
+    symbols: list[str] = Field(
+        default_factory=lambda: list(MAJORS), description="Pairs to trade. Each gets its own decision per bar. Broker suffixes (EURUSD.pro) are found automatically.",
+        json_schema_extra=ui("Traded pairs", "", "Each pair gets its own Opus decision every bar, so each one adds API cost."),
+    )
     magic: int = Field(551155, ge=1, description="Magic number on every bot order. Positions without it are never touched.", json_schema_extra=ui("Magic number", editable=False))
     dry_run: bool = Field(True, description="true: simulated fills, no orders are sent to MT5.", json_schema_extra=ui("Dry run", editable=False))
     bar_delay_s: int = Field(5, ge=1, le=60, description="Seconds after the M15 close before building the snapshot.", json_schema_extra=ui("Bar delay", "s", editable=False))
     server_port: int = Field(8765, ge=1024, le=65535, description="Local port for the UI server (127.0.0.1 only).", json_schema_extra=ui("UI port", editable=False))
 
+    @model_validator(mode="before")
+    @classmethod
+    def _from_one_symbol(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "symbol" in data:
+            data = dict(data)
+            old = data.pop("symbol")
+            data.setdefault("symbols", migrate_symbol(old))
+        return data
+
+    @field_validator("symbols")
+    @classmethod
+    def _symbols(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for raw in v:
+            sym = str(raw).strip()
+            if not _SYMBOL.match(sym):
+                raise ValueError(f"{sym!r} isn't a symbol name")
+            if sym.upper() not in (o.upper() for o in out):
+                out.append(sym)
+        if not out:
+            raise ValueError("Pick at least one pair")
+        return out
+
 
 class Config(_Section):
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade(cls, data: Any) -> Any:
+        """A config.yaml from the one-pair version: its news filter only knew USD and EUR."""
+        if isinstance(data, dict) and isinstance(data.get("app"), dict) and "symbol" in data["app"]:
+            news = data.get("news")
+            if isinstance(news, dict) and sorted(news.get("currencies") or []) == ["EUR", "USD"]:
+                data = {**data, "news": {**news, "currencies": list(CURRENCIES)}}
+        return data
+
     app: AppConfig = Field(default_factory=AppConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
@@ -216,7 +290,10 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         save_config(cfg, path)
         return cfg
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return Config.model_validate(data)
+    cfg = Config.model_validate(data)
+    if "symbol" in (data.get("app") or {}) or "max_open_positions" in (data.get("risk") or {}):
+        save_config(cfg, path)  # written by the one-pair version: rewrite it with the new keys and their comments
+    return cfg
 
 
 def _yaml_scalar(value: Any) -> str:
@@ -283,6 +360,9 @@ def field_specs(cfg: Config) -> list[dict]:
                 spec["type"] = "int"
             elif annotation is float:
                 spec["type"] = "float"
+            elif spec["key"] == "app.symbols":
+                spec["type"] = "pairs"
+                spec["choices"] = MAJORS + [v for v in spec["value"] if v.upper()[:6] not in MAJORS and v not in MAJORS]
             elif isinstance(spec["value"], str) and _HHMM.match(spec["value"]):
                 spec["type"] = "time"
             else:

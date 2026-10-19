@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     created_at TEXT NOT NULL,          -- UTC ISO time the row was written
     bar_time TEXT NOT NULL,            -- open time (UTC) of the closed M15 bar this decision is for
     mode TEXT NOT NULL,                -- dry | live
+    symbol TEXT,                       -- pair (as configured, e.g. GBPUSD); ALL for a skip that applied to every pair
     status TEXT NOT NULL,              -- CALLED | SKIPPED
     skip_reason TEXT,
     action TEXT, order_type TEXT, entry REAL, stop_loss REAL, take_profit REAL,
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS orders (
     created_at TEXT NOT NULL,
     decision_id INTEGER,
     mode TEXT NOT NULL,
+    symbol TEXT,
     purpose TEXT NOT NULL,             -- open | close | pending | modify | remove | check
     request_json TEXT,
     retcode INTEGER, retcode_name TEXT, comment TEXT,
@@ -60,6 +62,7 @@ CREATE INDEX IF NOT EXISTS ix_orders_decision ON orders(decision_id);
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY,
     mode TEXT NOT NULL,
+    symbol TEXT,
     ticket INTEGER NOT NULL,           -- MT5 position ticket (live) or paper ticket (dry)
     decision_id INTEGER,
     side TEXT NOT NULL,                -- long | short
@@ -77,6 +80,7 @@ CREATE INDEX IF NOT EXISTS ix_trades_close ON trades(mode, close_time);
 CREATE TABLE IF NOT EXISTS paper_orders (
     ticket INTEGER PRIMARY KEY,
     decision_id INTEGER,
+    symbol TEXT,
     side TEXT NOT NULL, volume REAL NOT NULL, price REAL NOT NULL, sl REAL NOT NULL, tp REAL NOT NULL,
     risk_eur REAL, setup TEXT, confidence INTEGER, signal_agreement TEXT,
     created_at TEXT NOT NULL, expires_at TEXT,
@@ -92,13 +96,15 @@ CREATE TABLE IF NOT EXISTS equity (
 
 CREATE TABLE IF NOT EXISTS bench_trades (
     id INTEGER PRIMARY KEY,
+    symbol TEXT NOT NULL,
     side TEXT NOT NULL,
-    entry_time TEXT NOT NULL UNIQUE,
+    entry_time TEXT NOT NULL,
     entry_price REAL NOT NULL, stop_initial REAL NOT NULL, stop REAL,
     volume REAL, risk_eur REAL,
     exit_time TEXT, exit_price REAL, exit_reason TEXT,
     pnl_eur REAL, r_multiple REAL,
-    status TEXT NOT NULL               -- open | closed
+    status TEXT NOT NULL,              -- open | closed
+    UNIQUE(symbol, entry_time)
 );
 
 CREATE TABLE IF NOT EXISTS bench_equity (
@@ -129,6 +135,21 @@ CREATE TABLE IF NOT EXISTS state (
 );
 """
 
+# Columns added when the bot learned to trade several pairs. Databases written before that
+# only ever traded EURUSD, so their rows are labelled EURUSD.
+LEGACY_SYMBOL = "EURUSD"
+SYMBOL_COLUMNS = ("decisions", "orders", "trades", "paper_orders")
+INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_decisions_bar ON decisions(mode, symbol, bar_time);
+CREATE INDEX IF NOT EXISTS ix_trades_symbol ON trades(mode, symbol, status);
+"""
+
+
+def bench_trades_sql() -> str:
+    """The CREATE TABLE statement for bench_trades, taken from SCHEMA."""
+    start = SCHEMA.index("CREATE TABLE IF NOT EXISTS bench_trades")
+    return SCHEMA[start:SCHEMA.index(";", start)]
+
 
 def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -150,6 +171,31 @@ class Store:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.executescript(SCHEMA)
+            self._migrate()
+            self.conn.executescript(INDEXES)
+
+    def _columns(self, table: str) -> set[str]:
+        return {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def _migrate(self) -> None:
+        """Bring a database from the one-pair version up to date. Safe to run every start."""
+        for table in SYMBOL_COLUMNS:
+            if "symbol" not in self._columns(table):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN symbol TEXT")
+                self.conn.execute(f"UPDATE {table} SET symbol=? WHERE symbol IS NULL", (LEGACY_SYMBOL,))
+        if "symbol" not in self._columns("bench_trades"):
+            # The old table had UNIQUE(entry_time), which two pairs flipping on the same bar would break: rebuild it.
+            self.conn.execute("BEGIN")
+            try:
+                self.conn.execute("ALTER TABLE bench_trades RENAME TO bench_trades_old")
+                self.conn.execute(bench_trades_sql())
+                cols = "side, entry_time, entry_price, stop_initial, stop, volume, risk_eur, exit_time, exit_price, exit_reason, pnl_eur, r_multiple, status"
+                self.conn.execute(f"INSERT INTO bench_trades (id, symbol, {cols}) SELECT id, ?, {cols} FROM bench_trades_old", (LEGACY_SYMBOL,))
+                self.conn.execute("DROP TABLE bench_trades_old")
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
 
     def close(self) -> None:
         with self.lock:

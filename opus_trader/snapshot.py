@@ -267,6 +267,8 @@ class SnapshotInputs:
     last_rejection: dict | None = None
     events: list[Event] = field(default_factory=list)
     risk_state: dict = field(default_factory=dict)
+    others: list[dict] = field(default_factory=list)  # bot trades open on the other pairs
+    exposure: dict = field(default_factory=dict)  # net trades per currency, all bot trades
     signal_cfg: SignalConfig = field(default_factory=SignalConfig)
     risk_cfg: RiskConfig = field(default_factory=RiskConfig)
 
@@ -304,13 +306,14 @@ def build(x: SnapshotInputs) -> Snapshot:
     spread_pips = round((x.ask - x.bid) / pip, 1)
 
     s4, s1, s15 = h4.tail(SEND_BARS["H4"]), h1.tail(SEND_BARS["H1"]), m15.tail(SEND_BARS["M15"])
-    h4_text = (f"## H4 candles: last {len(s4)} closed bars, UTC, oldest first\n{candles_csv(s4, d)}\n\n"
+    sym = x.symbol
+    h4_text = (f"# {sym}\n\n## {sym} H4 candles: last {len(s4)} closed bars, UTC, oldest first\n{candles_csv(s4, d)}\n\n"
                + indicators_line("H4", ind_h4, d, s4.time(-1), 240))
-    h1_text = (f"## H1 candles: last {len(s1)} closed bars, UTC, oldest first\n{candles_csv(s1, d)}\n\n"
+    h1_text = (f"## {sym} H1 candles: last {len(s1)} closed bars, UTC, oldest first\n{candles_csv(s1, d)}\n\n"
                + indicators_line("H1", ind_h1, d, s1.time(-1), 60))
 
     live: list[str] = []
-    live.append(f"## M15 candles: last {len(s15)} closed bars, UTC, oldest first\n{candles_csv(s15, d)}")
+    live.append(f"## {sym} M15 candles: last {len(s15)} closed bars, UTC, oldest first\n{candles_csv(s15, d)}")
     live.append(indicators_line("M15", ind_m15, d, s15.time(-1), 15))
 
     lv = ["## Levels"]
@@ -326,14 +329,15 @@ def build(x: SnapshotInputs) -> Snapshot:
 
     live.append(signal_text(sig_sum, d, sc))
 
-    live.append(f"## Market now\nBid {fmt_price(x.bid, d)} · Ask {fmt_price(x.ask, d)} · Spread {spread_pips} pips · {x.now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    live.append(f"## {sym} now\nBid {fmt_price(x.bid, d)} · Ask {fmt_price(x.ask, d)} · Spread {spread_pips} pips · "
+                f"{d} decimals, 1 pip = {pip:g} · {x.now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     mode_txt = "dry run: simulated fills" if x.mode == "dry" else "demo account: live orders"
     pnl_pct = (x.today_pnl / x.sod_equity * 100) if x.sod_equity else 0.0
     live.append(f"## Account ({mode_txt})\nBalance {x.balance:,.2f} {x.currency} · Equity {x.equity:,.2f} {x.currency} · "
-                f"Bot P&L today {signed(x.today_pnl)} {x.currency} ({signed(pnl_pct)}%) since 17:00 New York")
+                f"Bot P&L today {signed(x.today_pnl)} {x.currency} ({signed(pnl_pct)}%) since 17:00 New York, all pairs")
 
-    pos_lines = ["## Open bot position"]
+    pos_lines = [f"## Open bot position on {sym}"]
     if x.position:
         p = x.position
         pos_lines.append(f"{p['side'].capitalize()} {p['volume']:.2f} lots @ {fmt_price(p['entry'], d)} since {p['opened']} UTC ({p['bars_open']} bars) · "
@@ -343,10 +347,25 @@ def build(x: SnapshotInputs) -> Snapshot:
         pos_lines.append(f"No position. Pending {p['side']} limit {p['volume']:.2f} lots @ {fmt_price(p['price'], d)} · SL {fmt_price(p['sl'], d)} · "
                          f"TP {fmt_price(p['tp'], d)} · expires {p['expires']} UTC. CLOSE cancels it.")
     else:
-        pos_lines.append("None. You are flat.")
+        pos_lines.append(f"None. You are flat on {sym}.")
     live.append("\n".join(pos_lines))
 
-    tr = ["## Your last 10 closed trades"]
+    ot = ["## Bot trades on other pairs"]
+    if x.others:
+        for o in x.others:
+            if o.get("kind") == "pending":
+                ot.append(f"{o['symbol']}  pending {o['side']} limit @ {o['price']}")
+            else:
+                r_txt = f" · {signed(o['unrealized_r'])}R" if o.get("unrealized_r") is not None else ""
+                ot.append(f"{o['symbol']}  {o['side']} @ {o['price']} since {o.get('opened', 'n/a')} UTC{r_txt}")
+    else:
+        ot.append("None.")
+    if x.exposure:
+        parts = [f"{c} {'+' if n > 0 else '−'}{abs(n)}" for c, n in sorted(x.exposure.items())]
+        ot.append(f"Net currency exposure, in trades (+ long, − short), all pairs: {' · '.join(parts)}")
+    live.append("\n".join(ot))
+
+    tr = [f"## Your last 10 closed trades on {sym}"]
     if x.recent_trades:
         for t in x.recent_trades:
             tr.append(f"{t['close_time']}  {t['side']:<5}  {t.get('setup') or 'n/a'}  {signed(t['r_multiple'])}R  {t.get('exit_reason') or ''}".rstrip())
@@ -354,7 +373,7 @@ def build(x: SnapshotInputs) -> Snapshot:
         tr.append("None yet.")
     live.append("\n".join(tr))
 
-    dec = ["## Your last 3 decisions"]
+    dec = [f"## Your last 3 decisions on {sym}"]
     if x.recent_decisions:
         for r in x.recent_decisions:
             dec.append(f"{r['bar_time']}  {r['action']}  ({r.get('verdict') or ''}): {r.get('reasoning') or ''}")
@@ -376,13 +395,21 @@ def build(x: SnapshotInputs) -> Snapshot:
     live.append("\n".join(ev))
 
     rs = x.risk_state
-    allowed = "yes" if rs.get("entries_allowed", True) else "no (" + "; ".join(rs.get("blocked", [])) + ")"
+    if not rs.get("entries_allowed", True):
+        allowed = "no (" + "; ".join(rs.get("blocked", [])) + ")"
+    else:
+        def why(text: str) -> str:
+            return text[0].lower() + text[1:]
+
+        sides = [f"{side} {'blocked: ' + why(rs[f'{side}_blocked']) if rs.get(f'{side}_blocked') else 'allowed'}" for side in ("long", "short")]
+        allowed = "yes. " + "; ".join(s[0].upper() + s[1:] for s in sides)
     risk_eur = x.equity * x.risk_cfg.risk_per_trade_pct / 100
-    live.append(f"## Risk state\nNew entries allowed: {allowed}. Entries today: {rs.get('entries_today', 0)} of {x.risk_cfg.max_trades_per_day}. "
+    live.append(f"## Risk state\nNew entries on {sym} allowed: {allowed}. Open trades: {rs.get('open_trades', 0)} of {x.risk_cfg.max_open_trades} (all pairs). "
+                f"Entries today: {rs.get('entries_today', 0)} of {x.risk_cfg.max_trades_per_day} (all pairs). "
                 f"Risk per trade: {x.risk_cfg.risk_per_trade_pct:.2f}% of equity (≈ {risk_eur:,.2f} {x.currency}); the engine sizes the lots.")
 
     close_time = x.bar_time + timedelta(minutes=15)
-    live.append(f"Decide for the M15 bar that closed at {fmt_t(close_time)} UTC. Call submit_decision exactly once.")
+    live.append(f"Decide on {sym} for the M15 bar that closed at {fmt_t(close_time)} UTC. Call submit_decision exactly once.")
 
     data = {
         "bar_time": fmt_t(x.bar_time),
@@ -402,6 +429,8 @@ def build(x: SnapshotInputs) -> Snapshot:
         "last_rejection": x.last_rejection,
         "events": [e.to_dict(x.now) for e in x.events],
         "risk_state": rs,
+        "others": x.others,
+        "exposure": x.exposure,
         "signal": sig_sum,
     }
     return Snapshot(data, h4_text, h1_text, "\n\n".join(live), sig, float(ind_m15["atr14"] or 0.0))

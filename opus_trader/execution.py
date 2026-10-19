@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .clock import ServerTime, fmt_utc, parse_utc, session_of
-from .mt5_gateway import MT5Gateway, NotConnected, SafetyError, record
+from .mt5_gateway import MT5Gateway, NotConnected, SafetyError, SymbolView, record
 from .risk import PendingView, Plan, PositionView, SymbolSpec
 from .store import Store, now_iso
 
@@ -48,8 +48,9 @@ class ExecResult:
 class BaseExecutor:
     mode = "base"
 
-    def __init__(self, gw: MT5Gateway, store: Store, magic: int, deviation: Callable[[], int], server_time: ServerTime):
-        self.gw = gw
+    def __init__(self, gw: MT5Gateway | SymbolView, store: Store, magic: int, deviation: Callable[[], int], server_time: ServerTime):
+        self.gw = gw  # bound to one pair: a SymbolView, or a gateway (its primary pair)
+        self.symbol_name = gw.configured_symbol  # the pair as configured (EURUSD), stored on every row
         self.store = store
         self.magic = magic
         self.deviation = deviation
@@ -101,7 +102,7 @@ class BaseExecutor:
         d = record(res) if res is not None else {}
         code = d.get("retcode")
         row = {
-            "created_at": now_iso(), "decision_id": decision_id, "mode": self.mode, "purpose": purpose,
+            "created_at": now_iso(), "decision_id": decision_id, "mode": self.mode, "symbol": self.symbol_name, "purpose": purpose,
             "request_json": None if request is None else Store.dumps(request), "retcode": code,
             "retcode_name": None if code is None else self.gw.retcode_name(code),
             "comment": comment if comment is not None else d.get("comment"),
@@ -235,6 +236,11 @@ class PaperExecutor(BaseExecutor):
         self.spec = spec_provider
         self.now = clock_now
 
+    def _p(self, price: float) -> str:
+        """A price with the pair's own decimals (3 on JPY pairs, 5 on most others)."""
+        spec = self.spec()
+        return f"{price:.{spec.digits if spec else 5}f}"
+
     # ------------------------------------------------------------ ledger
     def balance(self) -> float:
         return float(self.store.get_state("paper_balance", 0.0))
@@ -260,10 +266,10 @@ class PaperExecutor(BaseExecutor):
         return round(abs(entry - sl) / spec.tick_size * spec.tick_value_loss * volume, 2)
 
     def open_trade_row(self) -> dict | None:
-        return self.store.one("SELECT * FROM trades WHERE mode='dry' AND status='open' ORDER BY id DESC LIMIT 1")
+        return self.store.one("SELECT * FROM trades WHERE mode='dry' AND status='open' AND symbol=? ORDER BY id DESC LIMIT 1", (self.symbol_name,))
 
     def pending_row(self) -> dict | None:
-        return self.store.one("SELECT * FROM paper_orders WHERE status='pending' ORDER BY ticket DESC LIMIT 1")
+        return self.store.one("SELECT * FROM paper_orders WHERE status='pending' AND symbol=? ORDER BY ticket DESC LIMIT 1", (self.symbol_name,))
 
     def unrealized(self, bid: float, ask: float) -> float:
         t = self.open_trade_row()
@@ -301,33 +307,33 @@ class PaperExecutor(BaseExecutor):
             price = float(tick.ask if plan.side == "long" else tick.bid)
             ticket = self._next_ticket()
             self._create_trade(ticket, decision_id, plan.side, plan.volume, price, plan.sl, plan.tp, self.now(), meta)
-            self._log_order("open", decision_id, req, None, True, comment=f"Simulated fill at {price:.5f}",
+            self._log_order("open", decision_id, req, None, True, comment=f"Simulated fill at {self._p(price)}",
                             retcode=0, retcode_name="PAPER", order_ticket=ticket, price=price, volume=plan.volume)
-            return ExecResult(True, f"Simulated fill at {price:.5f}", 0, "PAPER", ticket, price)
+            return ExecResult(True, f"Simulated fill at {self._p(price)}", 0, "PAPER", ticket, price)
         specified = self.gw.supports_specified_expiration()
         ok, res, req = self._check_with_filling("pending", decision_id, lambda f: self.limit_request(plan, decision_id, f, specified))
         if not ok:
             return ExecResult(False, f"order_check failed: {self.gw.retcode_name(res.retcode)} {res.comment}", res.retcode, self.gw.retcode_name(res.retcode))
         ticket = self._next_ticket()
         self.store.insert("paper_orders", {
-            "ticket": ticket, "decision_id": decision_id, "side": plan.side, "volume": plan.volume, "price": plan.price, "sl": plan.sl, "tp": plan.tp,
+            "ticket": ticket, "decision_id": decision_id, "symbol": self.symbol_name, "side": plan.side, "volume": plan.volume, "price": plan.price, "sl": plan.sl, "tp": plan.tp,
             "risk_eur": plan.risk_eur, "setup": meta.get("setup"), "confidence": meta.get("confidence"), "signal_agreement": meta.get("signal_agreement"),
             "created_at": fmt_utc(self.now()), "expires_at": fmt_utc(plan.expiration), "status": "pending",
         })
-        self._log_order("pending", decision_id, req, None, True, comment=f"Simulated limit order placed at {plan.price:.5f}",
+        self._log_order("pending", decision_id, req, None, True, comment=f"Simulated limit order placed at {self._p(plan.price)}",
                         retcode=0, retcode_name="PAPER", order_ticket=ticket, price=plan.price, volume=plan.volume)
-        return ExecResult(True, f"Simulated limit order at {plan.price:.5f}", 0, "PAPER", ticket, plan.price)
+        return ExecResult(True, f"Simulated limit order at {self._p(plan.price)}", 0, "PAPER", ticket, plan.price)
 
     def _create_trade(self, ticket, decision_id, side, volume, price, sl, tp, when: datetime, meta: dict) -> None:
         self.store.insert("trades", {
-            "mode": "dry", "ticket": ticket, "decision_id": decision_id, "side": side,
+            "mode": "dry", "symbol": self.symbol_name, "ticket": ticket, "decision_id": decision_id, "side": side,
             "setup": meta.get("setup"), "confidence": meta.get("confidence"), "signal_agreement": meta.get("signal_agreement"),
             "session": session_of(when), "open_time": fmt_utc(when), "open_price": price, "volume": volume,
             "sl_initial": sl, "tp_initial": tp, "sl": sl, "tp": tp, "risk_eur": self.risk_eur(volume, price, sl), "status": "open",
         })
 
     def close_position(self, ticket: int, reason: str, decision_id: int | None = None, price: float | None = None, when: datetime | None = None) -> ExecResult:
-        t = self.store.one("SELECT * FROM trades WHERE mode='dry' AND ticket=? AND status='open'", (ticket,))
+        t = self.store.one("SELECT * FROM trades WHERE mode='dry' AND ticket=? AND status='open' AND symbol=?", (ticket, self.symbol_name))
         if t is None:
             return ExecResult(False, "Paper position not found")
         if price is None:
@@ -338,12 +344,12 @@ class PaperExecutor(BaseExecutor):
         r = round(pnl / t["risk_eur"], 2) if t["risk_eur"] else None
         self.store.update("trades", t["id"], {"close_time": fmt_utc(when), "close_price": price, "exit_reason": reason, "pnl_eur": pnl, "r_multiple": r, "status": "closed"})
         self.store.set_state("paper_balance", round(self.balance() + pnl, 2))
-        self._log_order("close", decision_id, None, None, True, comment=f"Simulated close at {price:.5f} ({EXIT_LABELS.get(reason, reason)})",
+        self._log_order("close", decision_id, None, None, True, comment=f"Simulated close at {self._p(price)} ({EXIT_LABELS.get(reason, reason)})",
                         retcode=0, retcode_name="PAPER", order_ticket=ticket, price=price, volume=t["volume"])
-        return ExecResult(True, f"Simulated close at {price:.5f}", 0, "PAPER", ticket, price)
+        return ExecResult(True, f"Simulated close at {self._p(price)}", 0, "PAPER", ticket, price)
 
     def cancel_pending(self, ticket: int, reason: str, decision_id: int | None = None, status: str = "cancelled") -> ExecResult:
-        o = self.store.one("SELECT * FROM paper_orders WHERE ticket=? AND status='pending'", (ticket,))
+        o = self.store.one("SELECT * FROM paper_orders WHERE ticket=? AND status='pending' AND symbol=?", (ticket, self.symbol_name))
         if o is None:
             return ExecResult(False, "Paper order not found")
         self.store.update("paper_orders", ticket, {"status": status}, key="ticket")
@@ -352,13 +358,13 @@ class PaperExecutor(BaseExecutor):
         return ExecResult(True, f"Limit order {status}", 0, "PAPER", ticket)
 
     def modify_stop(self, ticket: int, sl: float, tp: float, decision_id: int | None = None) -> ExecResult:
-        t = self.store.one("SELECT * FROM trades WHERE mode='dry' AND ticket=? AND status='open'", (ticket,))
+        t = self.store.one("SELECT * FROM trades WHERE mode='dry' AND ticket=? AND status='open' AND symbol=?", (ticket, self.symbol_name))
         if t is None:
             return ExecResult(False, "Paper position not found")
         req = {"action": self.mt5.TRADE_ACTION_SLTP, "symbol": self.gw.symbol, "position": int(ticket), "sl": float(sl), "tp": float(tp), "magic": self.magic}
         self.store.update("trades", t["id"], {"sl": sl, "tp": tp})
-        self._log_order("modify", decision_id, req, None, True, comment=f"Simulated stop move to {sl:.5f}", retcode=0, retcode_name="PAPER", order_ticket=ticket)
-        return ExecResult(True, f"Stop moved to {sl:.5f}", 0, "PAPER", ticket)
+        self._log_order("modify", decision_id, req, None, True, comment=f"Simulated stop move to {self._p(sl)}", retcode=0, retcode_name="PAPER", order_ticket=ticket)
+        return ExecResult(True, f"Stop moved to {self._p(sl)}", 0, "PAPER", ticket)
 
     def position(self) -> PositionView | None:
         t = self.open_trade_row()

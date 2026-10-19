@@ -4,8 +4,8 @@
 
 # --- App ---
 app:
-  # Symbol to trade.
-  symbol: EURUSD
+  # Pairs to trade. Each gets its own decision per bar. Broker suffixes (EURUSD.pro) are found automatically.
+  symbols: [EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD]
   # Magic number on every bot order. Positions without it are never touched.
   magic: 551155
   # true: simulated fills, no orders are sent to MT5.
@@ -21,8 +21,10 @@ risk:
   risk_per_trade_pct: 0.5
   # Bot loss (realized + open) that halts trading until 17:00 New York, in percent of start-of-day equity.
   daily_loss_limit_pct: 2.0
-  # Maximum open bot positions (fixed at 1).
-  max_open_positions: 1
+  # Maximum bot positions plus pending orders open at once, across all pairs (one per pair).
+  max_open_trades: 3
+  # Maximum net trades in one direction of one currency. Long EURUSD and long GBPUSD are both short USD: that is 2.
+  max_currency_exposure: 1
   # Maximum new entries per trading day (17:00 to 17:00 New York).
   max_trades_per_day: 6
   # Minimum stop distance as a multiple of ATR(14) on M15.
@@ -57,8 +59,8 @@ news:
   blackout_after_min: 15
   # High-impact events file (relative to the project folder).
   events_file: events.yaml
-  # Currencies whose high-impact events trigger a blackout.
-  currencies: [USD, EUR]
+  # Currencies whose high-impact events trigger a blackout (for the pairs that contain them).
+  currencies: [USD, EUR, GBP, JPY, CHF, AUD, CAD, NZD]
 
 # --- Trend Signals ---
 signal:
@@ -79,6 +81,8 @@ model:
   model: claude-opus-5-5
   # Reasoning effort per decision. Higher is more thorough and costs more.
   effort: high
+  # How many pairs Opus decides at the same time after each bar.
+  max_concurrent_calls: 3
   # Seconds to wait for a decision before treating the bar as HOLD.
   timeout_s: 180
   # Maximum output tokens per decision (thinking included).

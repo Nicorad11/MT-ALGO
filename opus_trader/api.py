@@ -150,7 +150,7 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         else:
             summary = d["setup"] or first_sentence(d["reasoning"])
         return {
-            "id": d["id"], "kind": "decision", "time": d["created_at"], "bar_time": d["bar_time"], "mode": d["mode"],
+            "id": d["id"], "kind": "decision", "time": d["created_at"], "bar_time": d["bar_time"], "mode": d["mode"], "symbol": d["symbol"],
             "status": d["status"], "action": d["action"], "verdict": d["verdict"], "verdict_reason": d["verdict_reason"],
             "order_type": d["order_type"], "confidence": d["confidence"], "setup": d["setup"], "summary": summary,
             "reasoning": d["reasoning"], "invalidation": d["invalidation"], "agreement": d["signal_agreement"],
@@ -179,31 +179,59 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         out["max_dd_pct"], out["max_dd_eur"] = dd_pct, dd_eur
         return out
 
-    async def position() -> dict | None:
+    def digits_of(symbol: str | None) -> int:
+        b = engine.books.get(symbol or "")
+        return b.spec.digits if b and b.spec else 5
+
+    async def positions() -> list[dict]:
+        """Every bot position and pending order in the current mode, on every pair."""
         m = mode()
-        t = store.one("SELECT * FROM trades WHERE mode=? AND status='open' ORDER BY id DESC LIMIT 1", (m,))
-        if t:
-            unreal = None
+        out: list[dict] = []
+        live_pos = {}
+        if m == "live" and engine.rt.connected:
             try:
-                unreal = await engine.unrealized(m) if engine.rt.connected else None
+                live_pos = {p.ticket: p for p in await engine.mt(engine.gw.all_bot_positions)}
             except NotConnected:
                 pass
+        for t in store.query("SELECT * FROM trades WHERE mode=? AND status='open' ORDER BY id", (m,)):
+            unreal = None
+            book = engine.books.get(t["symbol"])
+            if m == "dry":
+                if book and book.bid is not None:
+                    unreal = book.paper.unrealized(book.bid, book.ask)
+            elif t["ticket"] in live_pos:
+                p = live_pos[t["ticket"]]
+                unreal = round(p.profit + p.swap, 2)
             r = round(unreal / t["risk_eur"], 2) if unreal is not None and t["risk_eur"] else None
-            return {"kind": "position", "ticket": t["ticket"], "side": t["side"], "volume": t["volume"], "entry": t["open_price"], "sl": t["sl"], "tp": t["tp"],
-                    "unrealized": unreal, "r": r, "open_time": t["open_time"], "setup": t["setup"]}
+            out.append({"kind": "position", "symbol": t["symbol"], "digits": digits_of(t["symbol"]), "ticket": t["ticket"], "side": t["side"],
+                        "volume": t["volume"], "entry": t["open_price"], "sl": t["sl"], "tp": t["tp"], "unrealized": unreal, "r": r,
+                        "open_time": t["open_time"], "setup": t["setup"]})
         if m == "dry":
-            o = engine.paper.pending_row()
-            if o:
-                return {"kind": "pending", "ticket": o["ticket"], "side": o["side"], "volume": o["volume"], "entry": o["price"], "sl": o["sl"], "tp": o["tp"], "expires": o["expires_at"]}
+            for o in store.query("SELECT * FROM paper_orders WHERE status='pending' ORDER BY ticket"):
+                out.append({"kind": "pending", "symbol": o["symbol"], "digits": digits_of(o["symbol"]), "ticket": o["ticket"], "side": o["side"],
+                            "volume": o["volume"], "entry": o["price"], "sl": o["sl"], "tp": o["tp"], "expires": o["expires_at"]})
         elif engine.rt.connected:
-            try:
-                pend = await engine.mt(engine.live.pending)
-            except NotConnected:
-                pend = None
-            if pend:
-                return {"kind": "pending", "ticket": pend.ticket, "side": pend.side, "volume": pend.volume, "entry": pend.price, "sl": pend.sl, "tp": pend.tp,
-                        "expires": engine.store.get_state("live_pending_expiry", {}).get(str(pend.ticket))}
-        return None
+            expiries = engine.store.get_state("live_pending_expiry", {})
+            for book in list(engine.books.values()):
+                try:
+                    pend = await engine.mt(book.live.pending)
+                except NotConnected:
+                    break
+                if pend:
+                    out.append({"kind": "pending", "symbol": book.symbol, "digits": digits_of(book.symbol), "ticket": pend.ticket, "side": pend.side,
+                                "volume": pend.volume, "entry": pend.price, "sl": pend.sl, "tp": pend.tp, "expires": expiries.get(str(pend.ticket))})
+        return out
+
+    def board(m: str) -> list[dict]:
+        """One row per traded pair: its latest decision (or the latest skip of every pair, if newer)."""
+        rows = []
+        latest_all = store.one("SELECT * FROM decisions WHERE mode=? AND symbol='ALL' ORDER BY id DESC LIMIT 1", (m,))
+        for sym in engine.status()["symbols"]:
+            d = store.one("SELECT * FROM decisions WHERE mode=? AND symbol=? AND verdict!='PENDING' ORDER BY id DESC LIMIT 1", (m, sym))
+            if latest_all and (d is None or latest_all["id"] > d["id"]):
+                d = latest_all
+            rows.append({"symbol": sym, "latest": None if d is None else decision_summary(d)})
+        return rows
 
     def api_cost_since(start: datetime, m: str | None = None) -> float:
         row = store.one("SELECT COALESCE(SUM(cost_usd),0) AS c FROM decisions WHERE created_at>=?" + (" AND mode=?" if m else ""), (fmt_utc(start), m) if m else (fmt_utc(start),))
@@ -219,16 +247,24 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
 
     # ------------------------------------------------------------ read endpoints
     @app.get("/api/state")
-    async def state() -> dict:
+    async def state(symbol: str | None = None) -> dict:
+        """Everything the Live screen shows; `symbol` picks the pair for the latest-call card."""
         m = mode()
-        latest = store.one("SELECT * FROM decisions WHERE mode=? AND status='CALLED' AND verdict!='PENDING' ORDER BY id DESC LIMIT 1", (m,))
+        if symbol:
+            latest = store.one("SELECT * FROM decisions WHERE mode=? AND symbol=? AND status='CALLED' AND verdict!='PENDING' ORDER BY id DESC LIMIT 1", (m, symbol))
+        else:
+            latest = store.one("SELECT * FROM decisions WHERE mode=? AND status='CALLED' AND verdict!='PENDING' ORDER BY id DESC LIMIT 1", (m,))
         recent = store.query("SELECT * FROM decisions WHERE mode=? AND verdict!='PENDING' ORDER BY id DESC LIMIT 8", (m,))
         now = engine.clock.now()
+        pos = await positions()
         return {
             "version": __version__,
             "status": engine.status(),
             "kpis": await kpis(),
-            "position": await position(),
+            "positions": pos,
+            "position": pos[0] if pos else None,
+            "max_open_trades": engine.cfg.risk.max_open_trades,
+            "board": board(m),
             "latest": None if latest is None else decision_summary(latest),
             "recent": [decision_summary(d) for d in recent],
             "holds": holds_count(m),
@@ -239,12 +275,15 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         }
 
     @app.get("/api/candles")
-    async def candles(bars: int = 192) -> dict:
+    async def candles(bars: int = 192, symbol: str | None = None) -> dict:
         bars = max(20, min(bars, 1000))
         if not engine.rt.connected:
             raise HTTPException(503, "MT5 disconnected")
+        book = engine.books.get(symbol) if symbol else engine.primary
+        if book is None:
+            raise HTTPException(404, f"{symbol} isn't traded")
         try:
-            rates = await engine.mt(engine.gw.rates, engine.gw.mt5.TIMEFRAME_M15, 1, 1000)
+            rates = await engine.mt(book.view.rates, engine.gw.mt5.TIMEFRAME_M15, 1, 1000)
         except NotConnected:
             raise HTTPException(503, "MT5 disconnected")
         b = Bars.from_rates(rates, engine.server_time)
@@ -253,12 +292,15 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         t = [int(x) for x in b.t[sl]]
         start = t[0] if t else 0
 
+        digits = book.spec.digits if book.spec else 5
+
         def series(arr):
-            return [{"time": tt, "value": round(float(v), 5)} for tt, v in zip(t, arr[sl]) if not math.isnan(v)]
+            return [{"time": tt, "value": round(float(v), digits)} for tt, v in zip(t, arr[sl]) if not math.isnan(v)]
 
         m = mode()
         markers, lines = [], []
-        for tr in store.query("SELECT * FROM trades WHERE mode=? AND (close_time IS NULL OR close_time>=?) ORDER BY open_time", (m, fmt_utc(datetime.fromtimestamp(start, UTC)))):
+        for tr in store.query("SELECT * FROM trades WHERE mode=? AND symbol=? AND (close_time IS NULL OR close_time>=?) ORDER BY open_time",
+                              (m, book.symbol, fmt_utc(datetime.fromtimestamp(start, UTC)))):
             ot = iso_to_epoch(tr["open_time"])
             if ot >= start:
                 markers.append({"time": ot - ot % 900, "kind": "entry", "side": tr["side"], "text": "Long" if tr["side"] == "long" else "Short"})
@@ -273,14 +315,15 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
                     lines.append({"kind": "sl", "price": tr["sl"]})
                 if tr["tp"]:
                     lines.append({"kind": "tp", "price": tr["tp"]})
-        pos = await position()
-        if pos and pos["kind"] == "pending":
-            lines += [{"kind": "limit", "price": pos["entry"]}, {"kind": "sl", "price": pos["sl"]}, {"kind": "tp", "price": pos["tp"]}]
+        for pos in await positions():
+            if pos["kind"] == "pending" and pos["symbol"] == book.symbol:
+                lines += [{"kind": "limit", "price": pos["entry"]}, {"kind": "sl", "price": pos["sl"]}, {"kind": "tp", "price": pos["tp"]}]
         markers.sort(key=lambda x: x["time"])
         return {
+            "symbol": book.symbol, "broker_symbol": book.broker_symbol,
             "candles": [{"time": tt, "open": float(o), "high": float(h), "low": float(lo), "close": float(c)} for tt, o, h, lo, c in zip(t, b.o[sl], b.h[sl], b.l[sl], b.c[sl])],
             "ema20": series(e20), "ema50": series(e50), "ema200": series(e200),
-            "markers": markers, "lines": lines, "bid": engine.rt.bid, "digits": engine.spec.digits if engine.spec else 5,
+            "markers": markers, "lines": lines, "bid": book.bid, "digits": digits,
         }
 
     @app.get("/api/equity")
@@ -294,10 +337,13 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         bdd, _, _ = drawdown_series(bpts)
         return {"opus": [{"time": t, "value": v} for t, v in pts], "bench": [{"time": t, "value": v} for t, v in bpts], "opus_dd": dd, "bench_dd": bdd}
 
-    def journal_rows(flt: str, q: str, before: str | None, limit: int) -> list[dict]:
+    def journal_rows(flt: str, q: str, before: str | None, limit: int, symbol: str = "") -> list[dict]:
         m = mode()
         params: list[Any] = [m]
         where = ["mode=?", "verdict!='PENDING'"]
+        if symbol:
+            where.append("symbol IN (?, 'ALL')")
+            params.append(symbol)
         if before:
             where.append("created_at<?")
             params.append(before)
@@ -308,21 +354,25 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         elif flt == "trades":
             where.append("verdict='APPROVED' AND action!='HOLD'")
         if q:
-            where.append("(reasoning LIKE ? OR setup LIKE ? OR verdict_reason LIKE ? OR skip_reason LIKE ? OR invalidation LIKE ?)")
-            params += [f"%{q}%"] * 5
+            where.append("(reasoning LIKE ? OR setup LIKE ? OR verdict_reason LIKE ? OR skip_reason LIKE ? OR invalidation LIKE ? OR symbol LIKE ?)")
+            params += [f"%{q}%"] * 6
         decs = [decision_summary(d) for d in store.query(f"SELECT * FROM decisions WHERE {' AND '.join(where)} ORDER BY created_at DESC, id DESC LIMIT ?", params + [limit])]
         items = decs
         if flt in ("all", "trades"):
             tp: list[Any] = [m]
             tw = ["mode=?", "status='closed'"]
+            if symbol:
+                tw.append("symbol=?")
+                tp.append(symbol)
             if before:
                 tw.append("close_time<?")
                 tp.append(before)
             if q:
-                tw.append("(setup LIKE ? OR exit_reason LIKE ?)")
-                tp += [f"%{q}%"] * 2
+                tw.append("(setup LIKE ? OR exit_reason LIKE ? OR symbol LIKE ?)")
+                tp += [f"%{q}%"] * 3
             for t in store.query(f"SELECT * FROM trades WHERE {' AND '.join(tw)} ORDER BY close_time DESC LIMIT ?", tp + [limit]):
-                items.append({"id": f"t{t['id']}", "kind": "trade", "time": t["close_time"], "mode": t["mode"], "side": t["side"], "setup": t["setup"],
+                items.append({"id": f"t{t['id']}", "kind": "trade", "time": t["close_time"], "mode": t["mode"], "symbol": t["symbol"],
+                              "digits": digits_of(t["symbol"]), "side": t["side"], "setup": t["setup"],
                               "exit_reason": t["exit_reason"], "exit_label": EXIT_LABELS.get(t["exit_reason"], t["exit_reason"]),
                               "r": t["r_multiple"], "pnl": t["pnl_eur"], "volume": t["volume"], "open_price": t["open_price"], "close_price": t["close_price"],
                               "decision_id": t["decision_id"], "open_time": t["open_time"], "agreement": t["signal_agreement"]})
@@ -330,9 +380,9 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         return items[:limit]
 
     @app.get("/api/journal")
-    async def journal(filter: str = "all", q: str = "", before: str | None = None, limit: int = 60) -> dict:
+    async def journal(filter: str = "all", q: str = "", before: str | None = None, limit: int = 60, symbol: str = "") -> dict:
         limit = max(1, min(limit, 200))
-        items = journal_rows(filter, q.strip(), before, limit)
+        items = journal_rows(filter, q.strip(), before, limit, symbol.strip())
         return {"items": items, "next": items[-1]["time"] if len(items) == limit else None, "holds": holds_count(mode()), "mode": mode()}
 
     @app.get("/api/journal/{decision_id}")
@@ -342,6 +392,7 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
             raise HTTPException(404, "No such decision")
         snap = json.loads(d["snapshot_json"]) if d["snapshot_json"] else None
         out = decision_summary(d)
+        out["digits"] = (snap or {}).get("digits") or digits_of(d["symbol"])
         out.update({
             "skip_reason": d["skip_reason"], "model": d["model"], "llm_status": d["llm_status"], "error": d["error"], "stop_reason": d["stop_reason"],
             "input_tokens": d["input_tokens"], "output_tokens": d["output_tokens"], "cache_read_tokens": d["cache_read_tokens"],
@@ -361,7 +412,7 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
                 "ema_order": ema_order(i15), "asian_range": None if not asia else [asia["low"], asia["high"]],
                 "position": snap.get("position"), "pending": snap.get("pending"), "today_pnl": snap["account"]["today_pnl"],
                 "currency": snap["account"]["currency"], "events": snap.get("events") or [], "signal": snap.get("signal"),
-                "bars_sent": snap.get("bars_sent"), "risk_state": snap.get("risk_state"),
+                "bars_sent": snap.get("bars_sent"), "risk_state": snap.get("risk_state"), "others": snap.get("others") or [],
             }
         return out
 
@@ -374,15 +425,15 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         return {"system": p["system_text"] if p else None, "prompt": d["prompt_text"], "response": json.loads(d["response_json"]) if d["response_json"] else None}
 
     @app.get("/api/journal.csv")
-    async def journal_csv(filter: str = "all", q: str = "") -> Response:
-        items = journal_rows(filter, q.strip(), None, 100_000)
+    async def journal_csv(filter: str = "all", q: str = "", symbol: str = "") -> Response:
+        items = journal_rows(filter, q.strip(), None, 100_000, symbol.strip())
         buf = io.StringIO()
-        cols = ["time_utc", "kind", "mode", "bar_time_utc", "action", "order_type", "entry", "stop_loss", "take_profit", "confidence", "setup",
+        cols = ["time_utc", "kind", "mode", "pair", "bar_time_utc", "action", "order_type", "entry", "stop_loss", "take_profit", "confidence", "setup",
                 "verdict", "verdict_reason", "signal_agreement", "side", "exit_reason", "r_multiple", "pnl_eur", "reasoning", "invalidation"]
         w = csv.writer(buf)
         w.writerow(cols)
         for it in items:
-            w.writerow([it.get("time"), it["kind"], it.get("mode"), it.get("bar_time"), it.get("action"), it.get("order_type"), it.get("entry"),
+            w.writerow([it.get("time"), it["kind"], it.get("mode"), it.get("symbol"), it.get("bar_time"), it.get("action"), it.get("order_type"), it.get("entry"),
                         it.get("stop_loss"), it.get("take_profit"), it.get("confidence"), it.get("setup"), it.get("verdict"),
                         it.get("verdict_reason"), it.get("agreement"), it.get("side"), it.get("exit_reason"), it.get("r"), it.get("pnl"),
                         it.get("reasoning"), it.get("invalidation")])
@@ -416,6 +467,7 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
             "by_setup": group_r(rows, lambda r: (r["setup"] or "Unlabelled").strip()),
             "by_confidence": group_r(rows, lambda r: r["confidence"] if r["confidence"] else "—", order=[5, 4, 3, 2, 1, "—"]),
             "by_session": group_r(rows, lambda r: r["session"] or "—", order=sessions),
+            "by_symbol": group_r(rows, lambda r: r["symbol"] or "—", order=list(engine.cfg.app.symbols), top=12),
         }
 
     @app.get("/api/settings")
@@ -438,6 +490,8 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
             "news": {"file": src.name if src else None, "upcoming": len(upcoming), "next": None if nxt is None else nxt.to_dict(engine.clock.now()),
                      "error": getattr(engine.news.source, "error", None)},
             "can_switch_mode": not engine.has_open_book(engine.mode),
+            "open_pairs": sorted({t["symbol"] for t in store.query("SELECT symbol FROM trades WHERE status='open' UNION SELECT symbol FROM paper_orders WHERE status='pending'")}),
+            "unavailable": dict(engine.gw.unavailable),
         }
 
     @app.get("/api/stream")
@@ -473,14 +527,24 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         changes = data.get("changes") or {}
         if "app.dry_run" in changes:
             raise HTTPException(400, "Use the dry-run switch")
+        if "app.symbols" in changes:
+            new = changes["app.symbols"]
+            if not isinstance(new, list) or not new:
+                return JSONResponse({"error": "Pick at least one pair", "field": "app.symbols"}, status_code=400)
+            busy = engine.symbols_change_error([str(x) for x in new])
+            if busy:
+                return JSONResponse({"error": busy, "field": "app.symbols"}, status_code=409)
         try:
             diffs = engine.config.update(changes, source="ui")
         except SettingsError as exc:
             return JSONResponse({"error": exc.message, "field": exc.field}, status_code=400)
+        if any(k == "app.symbols" for k, _, _ in diffs):
+            await engine.resync_symbols()
         if diffs:
             engine.event("settings", "; ".join(f"{k}: {o} → {n}" for k, o, n in diffs))
             engine.bus.publish("settings", {"keys": [k for k, _, _ in diffs]})
-        return {"ok": True, "changed": [{"key": k, "old": o, "new": n} for k, o, n in diffs]}
+        return {"ok": True, "changed": [{"key": k, "old": o, "new": n} for k, o, n in diffs],
+                "unavailable": [s for s in engine.cfg.app.symbols if s in engine.gw.unavailable]}
 
     @app.post("/api/dry-run")
     async def dry_run(request: Request) -> dict:
@@ -530,9 +594,11 @@ def create_app(engine: Engine, token: str, on_exit: Callable[[], None] | None = 
         async def sim_decide(request: Request) -> dict:
             from .clock import last_closed_bar_open
 
-            kind = (await body(request)).get("kind", "hold")
+            data = await body(request)
+            kind = data.get("kind", "hold")
+            symbol = data.get("symbol") or engine.primary.symbol
             engine.llm.force_next = kind
-            asyncio.get_running_loop().create_task(engine.safe_process_bar(last_closed_bar_open(engine.clock.now()), wait=False, repeat=True))
+            asyncio.get_running_loop().create_task(engine.safe_process_bar(last_closed_bar_open(engine.clock.now()), wait=False, repeat=True, symbols=[symbol]))
             return {"ok": True}
 
     return app

@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from .config import Config
+from .config import Config, pair_currencies
 
 ACTIONS = ("OPEN_LONG", "OPEN_SHORT", "HOLD", "CLOSE", "MOVE_STOP")
 
@@ -130,6 +130,47 @@ class PendingView:
 
 
 @dataclass
+class OpenTrade:
+    """A bot position or pending order on some pair, for the cross-pair rules."""
+
+    symbol: str
+    side: str  # long | short
+    kind: str = "position"  # position | pending
+
+    def label(self) -> str:
+        return f"{self.symbol} {self.side}" + (" limit" if self.kind == "pending" else "")
+
+
+def currency_legs(symbol: str, side: str) -> dict[str, int]:
+    """Which way a trade points each currency: long EURUSD is +1 EUR and -1 USD."""
+    base, quote = pair_currencies(symbol)
+    sign = 1 if side == "long" else -1
+    return {base: sign, quote: -sign}
+
+
+def exposure(trades: list[OpenTrade]) -> dict[str, int]:
+    """Net trades per currency direction: +2 USD means two trades long USD."""
+    net: dict[str, int] = {}
+    for t in trades:
+        for ccy, d in currency_legs(t.symbol, t.side).items():
+            net[ccy] = net.get(ccy, 0) + d
+    return {c: n for c, n in net.items() if n}
+
+
+def exposure_block(symbol: str, side: str, others: list[OpenTrade], limit: int) -> str | None:
+    """Why a new trade would double up on a currency, or None if it wouldn't."""
+    net = exposure(others)
+    for ccy, d in currency_legs(symbol, side).items():
+        after = net.get(ccy, 0) + d
+        if abs(after) > limit and abs(after) > abs(net.get(ccy, 0)):
+            way = "long" if d > 0 else "short"
+            same = [t.label() for t in others if currency_legs(t.symbol, t.side).get(ccy) == d]
+            return (f"a {side} would make {abs(after)} trades {way} {ccy} (max {limit})"
+                    + (f": {', '.join(same)} {'is' if len(same) == 1 else 'are'} already {way} {ccy}" if same else ""))
+    return None
+
+
+@dataclass
 class RiskState:
     equity: float
     position: PositionView | None = None
@@ -139,20 +180,36 @@ class RiskState:
     entry_block: str | None = None  # weekend window / news blackout reason
     recent_flip_direction: str | None = None  # long | short | None (Trend Signals, filter mode)
     currency: str = "EUR"
+    symbol: str = "EURUSD"
+    others: list[OpenTrade] = field(default_factory=list)  # bot trades open on the other pairs
 
     def blocked_reasons(self, cfg: Config) -> list[str]:
+        """Reasons no entry at all is possible on this pair right now."""
         out = []
         if self.entry_block:
             out.append(self.entry_block)
         if self.position or self.pending:
-            out.append("a bot position or order is already open (max 1)")
+            out.append(f"a bot {'position' if self.position else 'order'} is already open on {self.symbol} (one per pair)")
+        if len(self.others) >= cfg.risk.max_open_trades:
+            out.append(f"max {cfg.risk.max_open_trades} open trades reached ({', '.join(t.label() for t in self.others)})")
         if self.entries_today >= cfg.risk.max_trades_per_day:
             out.append(f"max {cfg.risk.max_trades_per_day} entries for today reached")
         if self.cooldown_bars_left > 0:
-            out.append(f"cooldown after a loss, {self.cooldown_bars_left} bar{'s' if self.cooldown_bars_left != 1 else ''} left")
+            out.append(f"cooldown after a loss on {self.symbol}, {self.cooldown_bars_left} bar{'s' if self.cooldown_bars_left != 1 else ''} left")
         if cfg.signal.mode == "filter" and self.recent_flip_direction is None:
             out.append(f"signal filter: no Trend Signals flip in the last {cfg.signal.filter_bars} bars")
+        if not out and self.side_block("long", cfg) and self.side_block("short", cfg):
+            out.append(f"{self.side_block('long', cfg)}; {self.side_block('short', cfg)}")
         return out
+
+    def side_block(self, side: str, cfg: Config) -> str | None:
+        """Direction-specific reason (currency exposure, signal filter), or None."""
+        why = exposure_block(self.symbol, side, self.others, cfg.risk.max_currency_exposure)
+        if why:
+            return why[0].upper() + why[1:]
+        if cfg.signal.mode == "filter" and self.recent_flip_direction and self.recent_flip_direction != side:
+            return f"Signal filter: only {self.recent_flip_direction} entries are allowed"
+        return None
 
 
 @dataclass
@@ -192,6 +249,14 @@ def reject(reason: str, **calc) -> Verdict:
 
 def _fmt(x: float, digits: int) -> str:
     return f"{x:.{digits}f}"
+
+
+def _vs(value: float, limit: float, digits: int = 1) -> str:
+    """A value next to its limit, with enough decimals that they never print the same (3.004 vs 3.0 -> 3.004)."""
+    for d in range(digits, 5):
+        if f"{value:.{d}f}" != f"{limit:.{d}f}":
+            return f"{value:.{d}f}"
+    return f"{value:.4f}"
 
 
 def size_lots(risk_eur: float, stop_distance: float, spec: SymbolSpec) -> tuple[float, float]:
@@ -235,12 +300,17 @@ def _evaluate_entry(d: Decision, spec: SymbolSpec, mkt: Market, st: RiskState, c
     if st.entry_block:
         return reject(f"No new entries: {st.entry_block}")
     if st.position or st.pending:
-        return reject("A bot position or pending order is already open (max 1)")
+        return reject(f"A bot {'position' if st.position else 'pending order'} is already open on {st.symbol} (one per pair)")
+    if len(st.others) >= r.max_open_trades:
+        return reject(f"Max {r.max_open_trades} open trades reached ({', '.join(t.label() for t in st.others)})")
     if st.entries_today >= r.max_trades_per_day:
         return reject(f"Max {r.max_trades_per_day} entries for today reached")
     if st.cooldown_bars_left > 0:
         n = st.cooldown_bars_left
-        return reject(f"Cooldown after a loss: {n} bar{'s' if n != 1 else ''} left")
+        return reject(f"Cooldown after a loss on {st.symbol}: {n} bar{'s' if n != 1 else ''} left")
+    doubled = exposure_block(st.symbol, side, st.others, r.max_currency_exposure)
+    if doubled:
+        return reject("Currency limit: " + doubled)
     if cfg.signal.mode == "filter" and st.recent_flip_direction != side:
         if st.recent_flip_direction is None:
             return reject(f"Signal filter: no Trend Signals flip in the last {cfg.signal.filter_bars} bars")
@@ -293,11 +363,11 @@ def _evaluate_entry(d: Decision, spec: SymbolSpec, mkt: Market, st: RiskState, c
     if atr <= 0:
         return reject("ATR is not available yet", **calc)
     if atr_mult < r.min_stop_atr - 1e-9:
-        return reject(f"Stop is {atr_mult:.1f}× ATR; minimum is {r.min_stop_atr:.1f}×", **calc)
+        return reject(f"Stop is {_vs(atr_mult, r.min_stop_atr)}× ATR; minimum is {r.min_stop_atr:.1f}×", **calc)
     if atr_mult > r.max_stop_atr + 1e-9:
-        return reject(f"Stop is {atr_mult:.1f}× ATR; maximum is {r.max_stop_atr:.1f}×", **calc)
+        return reject(f"Stop is {_vs(atr_mult, r.max_stop_atr)}× ATR; maximum is {r.max_stop_atr:.1f}×", **calc)
     if rr < r.min_reward_risk - 1e-9:
-        return reject(f"Reward:risk is {rr:.2f}; minimum is {r.min_reward_risk:.2f}", **calc)
+        return reject(f"Reward:risk is {_vs(rr, r.min_reward_risk, 2)}; minimum is {r.min_reward_risk:.2f}", **calc)
     sl_gap = (ref_sl - sl) if side == "long" else (sl - ref_sl)
     tp_gap = (tp - ref_tp) if side == "long" else (ref_tp - tp)
     if sl_gap < stops - 1e-12 or tp_gap < stops - 1e-12:

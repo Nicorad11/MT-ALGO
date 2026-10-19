@@ -76,7 +76,7 @@ def test_max_trades_per_day(spec, market, state, cfg):
 
 def test_cooldown_after_loss(spec, market, state, cfg):
     st = dataclasses.replace(state, cooldown_bars_left=2)
-    assert evaluate(long_(), spec, market, st, cfg).reason == "Cooldown after a loss: 2 bars left"
+    assert evaluate(long_(), spec, market, st, cfg).reason == "Cooldown after a loss on EURUSD: 2 bars left"
 
 
 def test_entry_block_from_schedule(spec, market, state, cfg):

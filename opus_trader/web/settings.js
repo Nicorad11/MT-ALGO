@@ -4,10 +4,24 @@
   const { $, fmt, api } = window.Opus;
   const Opus = window.Opus;
 
-  const GROUPS = ["risk", "schedule", "news", "signal", "model"];
+  const GROUPS = ["pairs", "risk", "schedule", "news", "signal", "model"];
   const HIDDEN = new Set(["model.max_tokens", "model.price_input_per_mtok", "model.price_output_per_mtok", "model.price_cache_read_per_mtok",
     "model.price_cache_write_1h_per_mtok", "news.currencies", "risk.max_stop_atr"]);
   let data = null;
+  const notes = {};  // "Saved" notes by key, kept across re-renders until they expire
+
+  function note(key, text, ms = 2500) {
+    notes[key] = { text, until: Date.now() + ms };
+    const el = $(`[data-saved="${key}"]`);
+    if (el) el.textContent = text;
+    setTimeout(() => {
+      if (notes[key] && notes[key].until <= Date.now()) {
+        delete notes[key];
+        const e2 = $(`[data-saved="${key}"]`);
+        if (e2) e2.textContent = "";
+      }
+    }, ms + 50);
+  }
 
   function decimals(f) {
     if (f.type === "int") return 0;
@@ -23,11 +37,22 @@
     return `${show(f, f.min)} – ${show(f, f.max)}`;
   }
 
+  function pairsControl(f) {
+    const on = new Set(f.value);
+    const open = new Set(data.open_pairs || []);
+    const missing = data.unavailable || {};
+    return `<div class="pair-grid" role="group" aria-label="Pairs">${f.choices.map((c) => {
+      const lock = on.has(c) && open.has(c);
+      const tip = lock ? `${c} has an open bot trade; close it before switching the pair off.` : missing[c] ? missing[c] : "";
+      return `<label class="check pair-check${missing[c] && on.has(c) ? " warn" : ""}"${tip ? ` data-tip="${fmt.esc(tip)}"` : ""}><input type="checkbox" data-pair="${fmt.esc(c)}"${on.has(c) ? " checked" : ""}${lock ? " disabled" : ""}> <span>${fmt.esc(c)}</span></label>`;
+    }).join("")}</div>`;
+  }
+
   function control(f) {
     const id = `set-${f.key.replace(".", "-")}`;
+    if (f.type === "pairs") return pairsControl(f);
     if (!f.editable) {
       let v = f.value;
-      if (f.key === "risk.max_open_positions") v = `${v} (fixed)`;
       if (f.key === "news.events_file") {
         const n = data.news;
         v = `${v} · ${n.upcoming} upcoming${n.next ? ` · next ${n.next.currency} ${n.next.title}, ${fmt.dayTime(n.next.time)} UTC` : ""}${n.error ? ` · ${n.error}` : ""}`;
@@ -57,6 +82,11 @@
         ${control(f)}<span class="muted">to</span>${control(max)}<span class="unit">× ATR</span><span class="range num">${rangeText(f)}</span>
         <span class="field-error" data-err="${f.key}"></span><span class="field-error" data-err="${max.key}"></span><span class="saved" data-saved="${f.key}"></span></div></div>`;
     }
+    if (f.type === "pairs") {
+      return `<div class="setting-row pairs-row"><div class="setting-label">${label}</div><div class="setting-control">${control(f)}
+        <span class="field-error" data-err="${f.key}"></span><span class="saved" data-saved="${f.key}"></span></div></div>
+        <div class="setting-row"><div class="setting-label"></div><div class="setting-control"><span class="muted" style="font-size:12px">Each pair is one Opus call per bar (about ${f.value.length * 96} calls a day while the market is open).</span></div></div>`;
+    }
     const unit = f.type === "time" ? "" : f.unit;
     const range = f.editable && f.type !== "choice" && f.type !== "time" ? `<span class="range num">${rangeText(f)}</span>` : "";
     const timeUnit = f.type === "time" ? `<span class="unit">${fmt.esc(f.unit)}</span>` : "";
@@ -68,6 +98,7 @@
   function render() {
     const byGroup = {};
     for (const f of data.fields) {
+      if (f.key === "app.symbols") { byGroup.pairs = [{ ...f, section_title: "Pairs" }]; continue; }
       if (f.section === "app" || HIDDEN.has(f.key)) continue;
       (byGroup[f.section] = byGroup[f.section] || []).push(f);
     }
@@ -89,6 +120,11 @@
     $("#settings-changes").innerHTML = ch.length ? ch.map((c) => `<li><span class="muted num">${fmt.dayTime(c.time)}</span><span>${fmt.esc(c.label)} ${fmt.esc(fmtVal(c.old_value))} → ${fmt.esc(fmtVal(c.new_value))}${c.unit && !["Fri UTC", "Sun UTC"].includes(c.unit) ? ` ${fmt.esc(c.unit)}` : ""}</span></li>`).join("")
       : '<li><span class="muted">No changes yet.</span><span></span></li>';
 
+    for (const [key, n] of Object.entries(notes)) {
+      const el = $(`[data-saved="${key}"]`);
+      if (el && n.until > Date.now()) el.textContent = n.text;
+    }
+
     const a = data.account || {};
     $("#settings-foot").innerHTML = `Magic number <span class="num">${data.magic}</span>${a.login ? ` · Account <span class="num">${a.login}</span> · ${fmt.esc(a.server || "")}` : ""} · Times are UTC · ` +
       'Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts™</a>';
@@ -98,6 +134,26 @@
     if (v === true) return "on";
     if (v === false) return "off";
     return String(v);
+  }
+
+  async function savePairs() {
+    const f = data.fields.find((x) => x.key === "app.symbols");
+    const boxes = Array.from(document.querySelectorAll("#settings-groups [data-pair]"));
+    const value = f.choices.filter((c) => boxes.find((b) => b.dataset.pair === c && b.checked));
+    const err = $('[data-err="app.symbols"]');
+    if (!value.length) { err.textContent = "Pick at least one pair"; boxes.forEach((b) => { b.checked = f.value.includes(b.dataset.pair); }); return; }
+    try {
+      const r = await api("/api/settings", { method: "PUT", body: { changes: { "app.symbols": value } } });
+      err.textContent = "";
+      f.value = value;
+      await reload(true);
+      Opus.refreshState();
+      const missing = (r.unavailable || []).length ? ` · not in this MT5 terminal: ${r.unavailable.join(", ")}` : "";
+      note("app.symbols", `Saved · applies from the next bar${missing}`, missing ? 6000 : 2500);
+    } catch (e) {
+      err.textContent = e.message;
+      boxes.forEach((b) => { b.checked = f.value.includes(b.dataset.pair); });
+    }
   }
 
   async function save(input) {
@@ -124,8 +180,7 @@
       input.classList.remove("invalid");
       err.textContent = "";
       f.value = value;
-      const saved = $(`[data-saved="${key === "risk.max_stop_atr" ? "risk.min_stop_atr" : key}"]`);
-      if (saved) { saved.textContent = "Saved · applies from the next bar"; setTimeout(() => { saved.textContent = ""; }, 2500); }
+      note(key === "risk.max_stop_atr" ? "risk.min_stop_atr" : key, "Saved · applies from the next bar");
       reload(false);
     } catch (e) {
       input.classList.add("invalid");
@@ -159,14 +214,17 @@
   Opus.views.settings = {
     init() {
       const groups = $("#settings-groups");
-      groups.addEventListener("change", (e) => { if (e.target.matches("[data-key]")) save(e.target); });
+      groups.addEventListener("change", (e) => {
+        if (e.target.matches("[data-pair]")) savePairs();
+        else if (e.target.matches("[data-key]")) save(e.target);
+      });
       groups.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.matches("[data-key]")) { e.preventDefault(); save(e.target); } });
       groups.addEventListener("input", (e) => { if (e.target.matches(".invalid")) { e.target.classList.remove("invalid"); const er = $(`[data-err="${e.target.dataset.key}"]`); if (er) er.textContent = ""; } });
       $("#dry-switch").addEventListener("click", async () => {
         const on = $("#dry-switch").getAttribute("aria-checked") === "true";
         if (!on) { setDry(true); return; }
         await reload();
-        if (!data.can_switch_mode) { Opus.toast("Close the open position or pending order first.", 4500); return; }
+        if (!data.can_switch_mode) { Opus.toast("Close the open positions and pending orders first.", 4500); return; }
         const a = data.account || {};
         const type = `${a.trade_mode === 0 ? "Demo" : "Not demo"} · ${a.margin_mode === 2 ? "Hedging" : "Netting"} · ${a.currency || ""}`;
         $("#dlg-dry-account").innerHTML = `<dt>Account</dt><dd class="num">${fmt.esc(a.login ?? "—")}</dd><dt>Server</dt><dd>${fmt.esc(a.server || "—")}</dd><dt>Type</dt><dd>${fmt.esc(type)}</dd>`;
