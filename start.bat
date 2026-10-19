@@ -6,38 +6,41 @@ cd /d "%~dp0"
 title Opus Trader
 set "PYTHONUTF8=1"
 call :setup
-if errorlevel 1 exit /b 1
+if not "%errorlevel%"=="0" exit /b 1
 if /i "%~1"=="--setup-only" exit /b 0
 rem On the first run, Opus Trader asks for your Anthropic API key here and saves it to .env.
 ".venv\Scripts\python.exe" -m opus_trader %*
-if errorlevel 1 pause
+if not "%errorlevel%"=="0" pause
 exit /b
 
 :setup
 rem An existing environment must be 64-bit Python 3.11 or newer (MetaTrader5 is 64-bit only).
 rem No %%VARIABLES%% inside parenthesised blocks here (cmd expands those before the block runs),
-rem and every step tests errorlevel on its own line rather than chaining commands.
+rem and every step tests errorlevel on its own line rather than chaining commands. Success means
+rem exactly 0, because the usual errorlevel-1 test misses negative codes, such as 0xA0000004 from
+rem the Python install manager's py when the requested version isn't installed.
 if not exist ".venv\Scripts\python.exe" goto :makeenv
 ".venv\Scripts\python.exe" -c "import struct,sys; sys.exit(0 if struct.calcsize('P')==8 and sys.version_info>=(3,11) else 1)" >nul 2>nul
-if errorlevel 1 goto :badvenv
+if not "%errorlevel%"=="0" goto :badvenv
 goto :deps
 
 :makeenv
 call :findpython
-if errorlevel 1 goto :nopython
+if not "%errorlevel%"=="0" goto :nopython
 echo Creating the Python environment with %PY% (first run only)...
 %PY% -m venv .venv
-if errorlevel 1 goto :nopython
+if not "%errorlevel%"=="0" goto :venvfail
+if not exist ".venv\Scripts\python.exe" goto :venvfail
 
 :deps
 rem Install dependencies on the first run and whenever requirements.txt changes.
 ".venv\Scripts\python.exe" -c "import sys; sys.exit(open('requirements.txt','rb').read() != open('.venv/requirements.installed','rb').read())" >nul 2>nul
-if not errorlevel 1 exit /b 0
+if "%errorlevel%"=="0" exit /b 0
 echo Installing dependencies (about a minute)...
 rem --no-compile: no .pyc files at install time, whose long paths can exceed Windows' 260-character limit.
 ".venv\Scripts\python.exe" -m pip install --quiet --no-compile --upgrade pip
 ".venv\Scripts\python.exe" -m pip install --quiet --no-compile --find-links wheels -r requirements.txt
-if errorlevel 1 goto :pipfail
+if not "%errorlevel%"=="0" goto :pipfail
 copy /y requirements.txt .venv\requirements.installed >nul
 exit /b 0
 
@@ -55,7 +58,7 @@ exit /b 0
 :trypython
 rem Use this command only if it runs a 64-bit Python 3.11 or newer.
 %* -c "import struct,sys; sys.exit(0 if struct.calcsize('P')==8 and sys.version_info>=(3,11) else 1)" >nul 2>nul
-if errorlevel 1 exit /b 1
+if not "%errorlevel%"=="0" exit /b 1
 set "PY=%*"
 exit /b 0
 
@@ -63,6 +66,14 @@ exit /b 0
 echo.
 echo  The .venv folder was made with a 32-bit or too old Python.
 echo  Delete the .venv folder, install 64-bit Python 3.13 from python.org, and start again.
+pause
+exit /b 1
+
+:venvfail
+echo.
+echo  Creating the Python environment with %PY% failed.
+echo  Delete the .venv folder in the Opus Trader folder and start again. If it fails again,
+echo  reinstall Python 3.13 or 3.14 (64-bit) from python.org.
 pause
 exit /b 1
 
