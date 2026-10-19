@@ -286,7 +286,8 @@ class Snapshot:
 
 
 def pip_size(digits: int, point: float) -> float:
-    return point * 10 if digits in (3, 5) else point
+    """0.0001 (0.01 for JPY-style quotes), however many decimals the broker adds: 4, 5 or 6."""
+    return 0.01 if digits <= 3 else 0.0001
 
 
 def build(x: SnapshotInputs) -> Snapshot:

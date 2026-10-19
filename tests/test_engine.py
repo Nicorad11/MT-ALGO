@@ -266,3 +266,10 @@ def test_missing_api_key_warns_from_the_start(tmp_path):
         assert any(b["text"].startswith("ANTHROPIC_API_KEY is not set.") for b in env.engine.banners())
     finally:
         env.close()
+
+
+def test_absurd_spread_gets_a_banner(env):
+    env.engine.rt.bid, env.engine.rt.ask = 1.12105, 1.14505  # 240 pips
+    assert any("spread is 240.0 pips" in b["text"] for b in env.engine.banners())
+    env.engine.rt.bid, env.engine.rt.ask = 1.12105, 1.12129  # 2.4 pips: skipped by the pre-check, but no banner
+    assert not any("spread is" in b["text"] for b in env.engine.banners())

@@ -16,6 +16,7 @@ import numpy as np
 from .clock import ServerTime, last_closed_bar_open
 from .config import CONFIG_PATH, ROOT, ConfigManager
 from .indicators import trend_signals as ts
+from .risk import SymbolSpec
 from .store import Store
 
 UTC = timezone.utc
@@ -117,7 +118,22 @@ def run_check(args) -> int:
     names = {mt5.ORDER_FILLING_IOC: "IOC", mt5.ORDER_FILLING_FOK: "FOK", mt5.ORDER_FILLING_RETURN: "RETURN"}
     line("Filling modes to try", " → ".join(names[m] for m in gw.filling_candidates()))
     line("Limit order expiry", "specified time (broker expires it)" if gw.supports_specified_expiration() else "GTC (Opus Trader removes it at expiry)")
-    line("Spread now", f"{info.spread / 10:.1f} pips")
+    pip = SymbolSpec.from_info(info).pip
+    tick = gw.tick()
+    spread = (tick.ask - tick.bid) / pip
+    line("Bid / ask now", f"{tick.bid:.{info.digits}f} / {tick.ask:.{info.digits}f}")
+    line("Spread now", f"{spread:.1f} pips (bars are skipped above {cfg.risk.max_spread_pips:g})", spread <= cfg.risk.max_spread_pips)
+    modes = {mt5.SYMBOL_TRADE_MODE_FULL: "full", mt5.SYMBOL_TRADE_MODE_DISABLED: "disabled", mt5.SYMBOL_TRADE_MODE_CLOSEONLY: "close only",
+             mt5.SYMBOL_TRADE_MODE_LONGONLY: "long only", mt5.SYMBOL_TRADE_MODE_SHORTONLY: "short only"}
+    line("Trading", modes.get(info.trade_mode, str(info.trade_mode)), info.trade_mode == mt5.SYMBOL_TRADE_MODE_FULL)
+    others = [o for o in (mt5.symbols_get(group=f"*{cfg.app.symbol}*") or ())
+              if o.name != gw.symbol and o.name.upper().startswith(cfg.app.symbol.upper())]
+    for o in others:
+        o_spread = f"spread {(o.ask - o.bid) / SymbolSpec.from_info(o).pip:.1f} pips" if o.bid and o.ask else "no quote (not in Market Watch)"
+        line("Also at this broker", f"{o.name}: {o_spread}, trading {modes.get(o.trade_mode, o.trade_mode)}")
+    if spread > cfg.risk.max_spread_pips:
+        print(f"     {'':<28}Every bar is skipped while the spread is this wide. If a symbol listed above has a normal")
+        print(f"     {'':<28}spread and full trading, set app.symbol to it in config.yaml and start again.")
 
     st = ServerTime()
     t1 = gw.tick()

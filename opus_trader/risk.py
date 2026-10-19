@@ -86,7 +86,8 @@ class SymbolSpec:
 
     @property
     def pip(self) -> float:
-        return self.point * 10 if self.digits in (3, 5) else self.point
+        # A pip is 0.0001 (0.01 for JPY-style quotes) however many decimals the broker adds: 4, 5 or 6.
+        return 0.01 if self.digits <= 3 else 0.0001
 
     def norm(self, price: float) -> float:
         ticks = round(price / self.tick_size)

@@ -120,3 +120,13 @@ def test_signal_filter_mode(spec, market, state, cfg):
 def test_input_mode_ignores_signal(spec, market, state, cfg):
     st = dataclasses.replace(state, recent_flip_direction="short")
     assert evaluate(long_(), spec, market, st, cfg).verdict == "APPROVED"
+
+
+@pytest.mark.parametrize("digits,pip", [(2, 0.01), (3, 0.01), (4, 0.0001), (5, 0.0001), (6, 0.0001)])
+def test_pip_is_the_same_however_many_decimals_the_broker_quotes(digits, pip):
+    from opus_trader.risk import SymbolSpec
+    from opus_trader.snapshot import pip_size
+
+    spec = SymbolSpec(digits, 10.0 ** -digits, 10.0 ** -digits, 1.0, 1.0, 0.01, 100.0, 0.01, 0, 0)
+    assert spec.pip == pip and pip_size(digits, 10.0 ** -digits) == pip
+    assert spec.pips(0.00024 if pip == 0.0001 else 0.024) == pytest.approx(2.4)  # a 2.4-pip spread

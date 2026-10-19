@@ -997,6 +997,9 @@ class Engine:
             out.append({"level": "warning", "text": "MT5 has no connection to the broker. Trading is paused."})
         elif not self.rt.algo_on:
             out.append({"level": "warning", "text": "Algo Trading is off in MT5. Turn it on in the terminal toolbar to resume."})
+        elif (sp := self.spread_pips()) is not None and sp > max(10.0, 5 * self.cfg.risk.max_spread_pips):
+            out.append({"level": "warning", "text": f"The {self.gw.symbol} spread is {sp:.1f} pips, so every bar is skipped. If MT5 shows a normal "
+                                                    f"spread, this symbol may not be the one your account trades: run check.bat."})
         if self.rt.model_warning:
             out.append({"level": "warning", "text": self.rt.model_warning})
         return out
